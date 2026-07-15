@@ -1,0 +1,48 @@
+<!--
+  The E# MSBuild SDK (targets half). Imports the chosen base SDK's targets, then
+  overrides CoreCompile to run the EsharpCompile task. In the packaged SDK the task
+  assembly ships under tools/; the local dev SDK (Local.Esharp.targets) points at the
+  Esharp.Build build output instead.
+-->
+<Project>
+  <Import Project="Sdk.targets" Sdk="$(EsharpSdkBase)" />
+
+  <!-- The EsharpCompile task assembly. Packaged layout: <pkg>/tools/net10.0/. -->
+  <UsingTask TaskName="Esharp.Build.EsharpCompile"
+             AssemblyFile="$(MSBuildThisFileDirectory)../tools/net10.0/Esharp.Build.dll" />
+
+  <!-- Stubs required by Microsoft.Common.targets for non-C#/VB languages -->
+  <Target Name="CreateManifestResourceNames" />
+
+  <!-- The .NET SDK ships IgnoreJavaScriptOutputAssembly (Microsoft.Common.CurrentVersion.targets):
+       it treats every '.esproj' as a JavaScript/TypeScript project that "never produces an
+       assembly" and forces ReferenceOutputAssembly=false on any P2P reference to one. E# esproj
+       DO produce assemblies, so overriding that target with an empty body restores normal
+       project-to-project assembly references between E# projects. -->
+  <Target Name="IgnoreJavaScriptOutputAssembly" />
+
+  <!-- Override CoreCompile to invoke the E# compiler -->
+  <Target Name="CoreCompile" DependsOnTargets="ResolveReferences">
+    <EsharpCompile
+      Sources="@(EsharpSource)"
+      References="@(ReferencePath)"
+      FrameworkReferences="@(FrameworkReference)"
+      OutputAssembly="$(IntermediateOutputPath)$(AssemblyName).dll"
+      AssemblyName="$(AssemblyName)"
+      OutputType="$(OutputType)"
+      EnableImplicitUsings="$(EnableImplicitUsings)"
+      DebugSymbols="$(DebugSymbols)" />
+
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).pdb"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(IntermediateOutputPath)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).runtimeconfig.json"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(IntermediateOutputPath)$(AssemblyName).runtimeconfig.json')" />
+  </Target>
+</Project>

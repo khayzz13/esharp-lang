@@ -1,0 +1,14 @@
+<!--
+  The E#-authored standard library. Compiles the `*.es` sources into Esharp.Stdlib.dll.
+  The compiler binds the language builtins (`Result`, `Chan`, …) against this assembly
+  by metadata name. This is the sole runtime surface for compiled E# programs.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Esharp.Stdlib</AssemblyName>
+  </PropertyGroup>
+
+</Project>

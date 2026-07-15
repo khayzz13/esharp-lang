@@ -1,0 +1,1033 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12",
+  "$id": "esharp-bound-nodes-schema",
+  "description": "Authoritative schema for the E# BoundTree node set. The generator (bound-nodes-gen.py) consumes this to regenerate BoundTreeVisitor.cs, BoundTreeRewriter.cs, and BoundNodes.Update.cs. Every change to the node set happens HERE first, then the generator is re-run. See contract-spine.md §1 for the CORE/FEATURE split rationale.",
+
+  "conventions": {
+    "tier": "CORE = survives lowering, reaches CodeGen. FEATURE = must be eliminated before CodeGen.",
+    "category": "TopLevel | Member | Statement | Expression | Supporting",
+    "fields": [
+      {
+        "name": "<C# property name matching the record parameter>",
+        "type": "<C# type string, e.g. BoundExpression, IReadOnlyList<BoundStatement>, BoundType, string, bool, int, ...>",
+        "nullable": "<true if the field is T? — i.e. optional child>",
+        "child_kind": "expr | stmt | block | field_init_list | expr_list | stmt_list | member | null",
+        "update": "<true if this field appears in the Update() method (the rewriter-visible mutable subset)>"
+      }
+    ],
+    "visit_children": "The visitor walks every child whose child_kind is not null.",
+    "rewrite_children": "The rewriter rewrites every child whose child_kind is not null AND update=true.",
+    "update_fields": "Only fields with update=true appear in the Update() signature.",
+    "note": "Scalar fields (string, bool, int, enum) are never child_kind — they do not recurse. BoundType fields in Update signatures are compared with ReferenceEquals per the cycle-prevention convention."
+  },
+
+  "nodes": [
+
+    {
+      "comment": "=== TOP-LEVEL ===",
+      "name": "BoundUsing",
+      "tier": "CORE",
+      "category": "TopLevel",
+      "base": null,
+      "fields": [
+        { "name": "IsStatic",  "type": "bool",    "nullable": false, "child_kind": null, "update": false },
+        { "name": "Path",      "type": "string",  "nullable": false, "child_kind": null, "update": false },
+        { "name": "Alias",     "type": "string",  "nullable": true,  "child_kind": null, "update": false }
+      ],
+      "note": "Not a BoundNode subtype — a plain record used inside BoundCompilationUnit. No Visit/Rewrite entry needed."
+    },
+
+    {
+      "name": "BoundCompilationUnit",
+      "tier": "CORE",
+      "category": "TopLevel",
+      "base": "BoundNode",
+      "fields": [
+        { "name": "NamespaceName", "type": "string",                       "nullable": true,  "child_kind": null,         "update": true  },
+        { "name": "Imports",       "type": "IReadOnlyList<BoundUsing>",    "nullable": false, "child_kind": null,         "update": true  },
+        { "name": "Members",       "type": "IReadOnlyList<BoundMember>",   "nullable": false, "child_kind": "member",     "update": true  }
+      ]
+    },
+
+    {
+      "comment": "=== MEMBERS (base: BoundMember : BoundNode, has Span) ===",
+      "name": "BoundFunctionDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic",                "type": "bool",                             "nullable": false, "child_kind": null,         "update": false },
+        { "name": "Name",                    "type": "string",                           "nullable": false, "child_kind": null,         "update": false },
+        { "name": "TypeParameters",          "type": "IReadOnlyList<string>",            "nullable": false, "child_kind": null,         "update": false },
+        { "name": "Parameters",              "type": "IReadOnlyList<BoundParameter>",    "nullable": false, "child_kind": null,         "update": true  },
+        { "name": "ReturnType",              "type": "BoundType",                        "nullable": false, "child_kind": null,         "update": true  },
+        { "name": "Body",                    "type": "BoundBlockStatement",              "nullable": false, "child_kind": "block",      "update": true  },
+        { "name": "Attributes",              "type": "IReadOnlyList<string>",            "nullable": false, "child_kind": null,         "update": false },
+        { "name": "HasAwait",                "type": "bool",                             "nullable": false, "child_kind": null,         "update": false },
+        { "name": "InheritanceRole",         "type": "InheritanceRole",                  "nullable": false, "child_kind": null,         "update": false },
+        { "name": "IsTaskFunc",              "type": "bool",                             "nullable": false, "child_kind": null,         "update": false },
+        { "name": "AsyncShape",              "type": "AsyncReturnShape",                 "nullable": false, "child_kind": null,         "update": false },
+        { "name": "ExplicitInterface",       "type": "string",                           "nullable": true,  "child_kind": null,         "update": false },
+        { "name": "ExplicitInterfaceType",   "type": "BoundType",                        "nullable": true,  "child_kind": null,         "update": false },
+        { "name": "ReceiverKind",            "type": "Esharp.Symbols.ReceiverKind",      "nullable": false, "child_kind": null,         "update": false },
+        { "name": "IsTypeBodyMethod",        "type": "bool",                             "nullable": false, "child_kind": null,         "update": false },
+        { "name": "Symbol",                  "type": "Esharp.Symbols.MethodSymbol",      "nullable": true,  "child_kind": null,         "update": false },
+        { "name": "AsyncStateMachineType",   "type": "BoundType",                        "nullable": true,  "child_kind": null,         "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundDataDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic",             "type": "bool",                                    "nullable": false, "child_kind": null,     "update": false },
+        { "name": "IsReadonly",           "type": "bool",                                    "nullable": false, "child_kind": null,     "update": false },
+        { "name": "Name",                 "type": "string",                                  "nullable": false, "child_kind": null,     "update": false },
+        { "name": "TypeParameters",       "type": "IReadOnlyList<string>",                   "nullable": false, "child_kind": null,     "update": false },
+        { "name": "DeriveTraits",         "type": "IReadOnlyList<string>",                   "nullable": false, "child_kind": null,     "update": false },
+        { "name": "Fields",               "type": "IReadOnlyList<BoundField>",               "nullable": false, "child_kind": null,     "update": true  },
+        { "name": "InstanceMethods",      "type": "IReadOnlyList<BoundFunctionDeclaration>", "nullable": false, "child_kind": "member", "update": true  },
+        { "name": "Classification",       "type": "DataClassification",                       "nullable": false, "child_kind": null,     "update": false },
+        { "name": "Attributes",           "type": "IReadOnlyList<string>",                   "nullable": false, "child_kind": null,     "update": false },
+        { "name": "Inits",                "type": "IReadOnlyList<BoundInitDeclaration>",     "nullable": true,  "child_kind": "member", "update": true  },
+        { "name": "DeclaringNamespace",   "type": "string",                                  "nullable": true,  "child_kind": null,     "update": false },
+        { "name": "PointerInterfaceTypes","type": "IReadOnlyList<BoundType>",                "nullable": true,  "child_kind": null,     "update": false },
+        { "name": "IsUserRef",            "type": "bool",                                    "nullable": false, "child_kind": null,     "update": false },
+        { "name": "Modifier",             "type": "ClassModifier",                            "nullable": false, "child_kind": null,     "update": false },
+        { "name": "BaseClass",            "type": "string",                                  "nullable": true,  "child_kind": null,     "update": false },
+        { "name": "InterfaceTypes",       "type": "IReadOnlyList<BoundType>",                "nullable": true,  "child_kind": null,     "update": false },
+        { "name": "CapturedHeaderParams", "type": "IReadOnlyList<string>",                   "nullable": true,  "child_kind": null,     "update": false },
+        { "name": "IsPositionalData",     "type": "bool",                                    "nullable": false, "child_kind": null,     "update": false },
+        { "name": "DeclaringTypeKey",     "type": "string",                                  "nullable": true,  "child_kind": null,     "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundInitDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "Parameters",    "type": "IReadOnlyList<BoundParameter>",  "nullable": false, "child_kind": null,    "update": true  },
+        { "name": "Body",          "type": "BoundBlockStatement",            "nullable": false, "child_kind": "block", "update": true  },
+        { "name": "BaseArguments", "type": "IReadOnlyList<BoundExpression>", "nullable": true,  "child_kind": "expr_list", "update": true  },
+        { "name": "ThisArguments", "type": "IReadOnlyList<BoundExpression>", "nullable": true,  "child_kind": "expr_list", "update": true  },
+        { "name": "DelegatesTo",   "type": "int",                            "nullable": false, "child_kind": null,    "update": false },
+        { "name": "Visibility",    "type": "Esharp.Compiler.Syntax.InitVisibility", "nullable": false, "child_kind": null, "update": false },
+        { "name": "IsPrimary",     "type": "bool",                           "nullable": false, "child_kind": null,    "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundNamespaceInitDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "Body", "type": "BoundBlockStatement", "nullable": false, "child_kind": "block", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundNamespaceStateDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "Field", "type": "BoundField", "nullable": false, "child_kind": null, "update": false },
+        { "name": "ComputedGetter", "type": "BoundExpression", "nullable": true, "child_kind": "expr", "update": true },
+        { "name": "SetterParam", "type": "string", "nullable": true, "child_kind": null, "update": false },
+        { "name": "SetterBody", "type": "BoundExpression", "nullable": true, "child_kind": "expr", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundInterfaceDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic",        "type": "bool",                                 "nullable": false, "child_kind": null, "update": false },
+        { "name": "Name",            "type": "string",                               "nullable": false, "child_kind": null, "update": false },
+        { "name": "TypeParameters",  "type": "IReadOnlyList<string>",                "nullable": false, "child_kind": null, "update": false },
+        { "name": "Methods",         "type": "IReadOnlyList<BoundInterfaceMethod>",  "nullable": false, "child_kind": null, "update": false },
+        { "name": "Events",          "type": "IReadOnlyList<BoundField>",            "nullable": true,  "child_kind": null, "update": false },
+        { "name": "DeclaringTypeKey","type": "string",                               "nullable": true,  "child_kind": null, "update": false },
+        { "name": "Properties",      "type": "IReadOnlyList<BoundInterfaceProperty>","nullable": true,  "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundDelegateDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic",        "type": "bool",                              "nullable": false, "child_kind": null, "update": false },
+        { "name": "Name",            "type": "string",                            "nullable": false, "child_kind": null, "update": false },
+        { "name": "Namespace",       "type": "string",                            "nullable": true,  "child_kind": null, "update": false },
+        { "name": "Parameters",      "type": "IReadOnlyList<BoundParameter>",     "nullable": false, "child_kind": null, "update": false },
+        { "name": "ReturnType",      "type": "BoundType",                         "nullable": false, "child_kind": null, "update": false },
+        { "name": "DeclaringTypeKey","type": "string",                            "nullable": true,  "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundStaticFuncDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic",        "type": "bool",                                    "nullable": false, "child_kind": null,     "update": false },
+        { "name": "Name",            "type": "string",                                  "nullable": false, "child_kind": null,     "update": false },
+        { "name": "Fields",          "type": "IReadOnlyList<BoundField>",               "nullable": false, "child_kind": null,     "update": true  },
+        { "name": "Functions",       "type": "IReadOnlyList<BoundFunctionDeclaration>", "nullable": false, "child_kind": "member", "update": true  },
+        { "name": "DeclaringTypeKey","type": "string",                                  "nullable": true,  "child_kind": null,     "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundConstDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic", "type": "bool",           "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Name",     "type": "string",         "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Type",     "type": "BoundType",      "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "Value",    "type": "BoundExpression","nullable": false, "child_kind": "expr", "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundChoiceDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic",        "type": "bool",                              "nullable": false, "child_kind": null, "update": false },
+        { "name": "IsRef",           "type": "bool",                              "nullable": false, "child_kind": null, "update": false },
+        { "name": "Name",            "type": "string",                            "nullable": false, "child_kind": null, "update": false },
+        { "name": "TypeParameters",  "type": "IReadOnlyList<string>",             "nullable": false, "child_kind": null, "update": false },
+        { "name": "Cases",           "type": "IReadOnlyList<BoundChoiceCase>",    "nullable": false, "child_kind": null, "update": false },
+        { "name": "DeclaringTypeKey","type": "string",                            "nullable": true,  "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundEnumDeclaration",
+      "tier": "CORE",
+      "category": "Member",
+      "base": "BoundMember",
+      "fields": [
+        { "name": "IsPublic",        "type": "bool",                          "nullable": false, "child_kind": null, "update": false },
+        { "name": "Name",            "type": "string",                        "nullable": false, "child_kind": null, "update": false },
+        { "name": "Cases",           "type": "IReadOnlyList<BoundEnumCase>",  "nullable": false, "child_kind": null, "update": false },
+        { "name": "DeclaringTypeKey","type": "string",                        "nullable": true,  "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "comment": "=== STATEMENTS — CORE ===",
+      "name": "BoundBlockStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Statements", "type": "IReadOnlyList<BoundStatement>", "nullable": false, "child_kind": "stmt_list", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundVariableDeclaration",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Mutable",      "type": "bool",           "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Name",         "type": "string",         "nullable": false, "child_kind": null,   "update": false },
+        { "name": "DeclaredType", "type": "BoundType",      "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "Initializer",  "type": "BoundExpression","nullable": false, "child_kind": "expr", "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundAssignment",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Target", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Value",  "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundIfStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Condition", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Then",      "type": "BoundStatement",  "nullable": false, "child_kind": "stmt", "update": true },
+        { "name": "Else",      "type": "BoundStatement",  "nullable": true,  "child_kind": "stmt", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundWhileStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Condition", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Body",      "type": "BoundStatement",  "nullable": false, "child_kind": "stmt", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundReturnStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Expression", "type": "BoundExpression", "nullable": true, "child_kind": "expr", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundBreakStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": []
+    },
+
+    {
+      "name": "BoundContinueStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": []
+    },
+
+    {
+      "name": "BoundLabelStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Name", "type": "string", "nullable": false, "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundGotoStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Target", "type": "string", "nullable": false, "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundExpressionStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Expression", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundScopedMutCall",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Receiver", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Call", "type": "BoundCallExpression", "nullable": false, "child_kind": "call_expr", "update": true },
+        { "name": "ArgumentIndex", "type": "int", "nullable": false, "child_kind": null, "update": false },
+        { "name": "Property", "type": "Esharp.Symbols.FieldSymbol", "nullable": false, "child_kind": null, "update": false },
+        { "name": "ResultLocal", "type": "string", "nullable": true, "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundTryStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "note": "Catches is IReadOnlyList<BoundCatchClause>; the rewriter recurses into clause Body+Guard specially.",
+      "fields": [
+        { "name": "Body",    "type": "BoundBlockStatement",           "nullable": false, "child_kind": "block",      "update": true },
+        { "name": "Catches", "type": "IReadOnlyList<BoundCatchClause>","nullable": false, "child_kind": "catch_list", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundThrowStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Expression", "type": "BoundExpression", "nullable": true, "child_kind": "expr", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundConstStatement",
+      "tier": "CORE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "fields": [
+        { "name": "Name",  "type": "string",          "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Type",  "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "Value", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  }
+      ]
+    },
+
+    {
+      "comment": "=== STATEMENTS — FEATURE (lowered away before CodeGen) ===",
+      "name": "BoundRaiseStatement",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "EventLowering",
+      "fields": [
+        { "name": "EventName",  "type": "string",                            "nullable": false, "child_kind": null,        "update": false },
+        { "name": "EventType",  "type": "BoundType",                         "nullable": false, "child_kind": null,        "update": true  },
+        { "name": "Arguments",  "type": "IReadOnlyList<BoundExpression>",    "nullable": false, "child_kind": "expr_list", "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundLetGuard",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "LetGuardLowering",
+      "fields": [
+        { "name": "Name",         "type": "string",             "nullable": false, "child_kind": null,    "update": false },
+        { "name": "DeclaredType", "type": "BoundType",          "nullable": false, "child_kind": null,    "update": true  },
+        { "name": "Initializer",  "type": "BoundExpression",    "nullable": false, "child_kind": "expr",  "update": true  },
+        { "name": "ElseBody",     "type": "BoundBlockStatement","nullable": false, "child_kind": "block", "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundForEachStatement",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "ForEachLowering",
+      "fields": [
+        { "name": "Identifier",       "type": "string",                   "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Collection",        "type": "BoundExpression",          "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "Body",              "type": "BoundStatement",           "nullable": false, "child_kind": "stmt", "update": true  },
+        { "name": "DestructuredNames", "type": "IReadOnlyList<string>",    "nullable": true,  "child_kind": null,   "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundMatchStatement",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "MatchLowering",
+      "note": "Arms is IReadOnlyList<BoundMatchArm>; each arm has a Pattern + Guard? + Body (block). Rewriter recurses into Guard + Body per arm.",
+      "fields": [
+        { "name": "Subject",     "type": "BoundExpression",          "nullable": false, "child_kind": "expr",      "update": true  },
+        { "name": "SubjectType", "type": "BoundType",                "nullable": false, "child_kind": null,        "update": true  },
+        { "name": "Arms",        "type": "IReadOnlyList<BoundMatchArm>","nullable": false,"child_kind": "match_arm_list","update": true }
+      ]
+    },
+
+    {
+      "name": "BoundDeferStatement",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "DeferLowering",
+      "fields": [
+        { "name": "Body", "type": "BoundBlockStatement", "nullable": false, "child_kind": "block", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundAsyncLetStatement",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "AsyncLetLowering",
+      "fields": [
+        { "name": "Name",         "type": "string",          "nullable": false, "child_kind": null,   "update": false },
+        { "name": "DeclaredType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "Initializer",  "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundYieldStatement",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "AsyncStreamLowering",
+      "note": "A value yielded by an IAsyncEnumerable<T> producer. It becomes await AsyncStream.Write(channel, value, cancellationToken).",
+      "fields": [
+        { "name": "Value", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundSelectStatement",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "ConcurrencyLowering",
+      "note": "Arms is IReadOnlyList<BoundSelectArm>; each arm has Channel?, Value?, Body (block). Rewriter recurses per arm.",
+      "fields": [
+        { "name": "Arms",              "type": "IReadOnlyList<BoundSelectArm>",       "nullable": false, "child_kind": "select_arm_list", "update": true  },
+        { "name": "CapturedVariables", "type": "IReadOnlyList<BoundCapturedVariable>","nullable": false, "child_kind": null,              "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundCompoundAssignment",
+      "tier": "FEATURE",
+      "category": "Statement",
+      "base": "BoundStatement",
+      "lowered_by": "AssignmentLowering",
+      "fields": [
+        { "name": "Target", "type": "BoundExpression",     "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "Op",     "type": "SyntaxTokenKind",     "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Value",  "type": "BoundExpression",     "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "IsEventSubscription", "type": "bool",    "nullable": false, "child_kind": null,   "update": false }
+      ]
+    },
+
+    {
+      "comment": "=== EXPRESSIONS — CORE ===",
+      "name": "BoundErrorExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "Type is always InferredType.Instance. No fields. Leaf.",
+      "fields": []
+    },
+
+    {
+      "name": "BoundLiteralExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Value", "type": "object",    "nullable": true,  "child_kind": null, "update": false },
+        { "name": "Text",  "type": "string",    "nullable": false, "child_kind": null, "update": false },
+        { "name": "Type",  "type": "BoundType", "nullable": false, "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundNameExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "force_rewrite": true,
+      "fields": [
+        { "name": "Name", "type": "string",    "nullable": false, "child_kind": null, "update": false },
+        { "name": "Type", "type": "BoundType", "nullable": false, "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundUnaryExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Op",      "type": "SyntaxTokenKind", "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Operand", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "Type",    "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundBinaryExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Left",  "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "Op",    "type": "SyntaxTokenKind", "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Right", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "Type",  "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundMemberAccessExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Target",     "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "MemberName", "type": "string",          "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Type",       "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundConversion",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "[Δ new] Unified cast/box/narrow node. Collapses BoundSafeCastExpression, BoundAssertCastExpression, BoundNarrowedExpression.",
+      "fields": [
+        { "name": "Operand",    "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "TargetType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "Kind",       "type": "ConversionKind",  "nullable": false, "child_kind": null,   "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundTypeTestExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "Boolean `is` / `is not` test. Produces bool, never a cast value. Kept as CORE primitive.",
+      "fields": [
+        { "name": "Operand",    "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "TargetType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "Negated",    "type": "bool",            "nullable": false, "child_kind": null,   "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundCallExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Target",               "type": "BoundExpression",           "nullable": false, "child_kind": "expr",      "update": true  },
+        { "name": "Arguments",            "type": "IReadOnlyList<BoundExpression>","nullable": false,"child_kind": "expr_list","update": true  },
+        { "name": "Type",                 "type": "BoundType",                 "nullable": false, "child_kind": null,        "update": true  },
+        { "name": "ExplicitTypeArguments","type": "IReadOnlyList<BoundType>",  "nullable": true,  "child_kind": null,        "update": true  },
+        { "name": "ResolvedMethod",       "type": "Esharp.Symbols.MethodSymbol","nullable": true, "child_kind": null,        "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundObjectCreationExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "ObjectType", "type": "BoundType",                     "nullable": false, "child_kind": null,            "update": true },
+        { "name": "Fields",     "type": "IReadOnlyList<BoundFieldInit>", "nullable": false, "child_kind": "field_init_list","update": true },
+        { "name": "ConstructorArguments", "type": "IReadOnlyList<BoundExpression>", "nullable": false, "child_kind": "expr_list", "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundIndexExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Target", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Index",  "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Type",   "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundArrayCreationExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "ElementType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true },
+        { "name": "Size",        "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Type",        "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundTupleLiteralExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Elements", "type": "IReadOnlyList<BoundExpression>", "nullable": false, "child_kind": "expr_list", "update": true },
+        { "name": "Type",     "type": "BoundType",                     "nullable": false, "child_kind": null,        "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundDefaultExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "Type", "type": "BoundType", "nullable": false, "child_kind": null, "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundOutArgumentExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "Leaf — no child expressions to recurse into.",
+      "fields": [
+        { "name": "Name",         "type": "string",    "nullable": false, "child_kind": null, "update": false },
+        { "name": "SlotType",     "type": "BoundType", "nullable": false, "child_kind": null, "update": false },
+        { "name": "DeclaresLocal","type": "bool",      "nullable": false, "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundAddressOfExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "Leaf — takes a function name string + type info, emits ldftn.",
+      "fields": [
+        { "name": "FunctionName",    "type": "string",                   "nullable": false, "child_kind": null, "update": false },
+        { "name": "ParameterTypes",  "type": "IReadOnlyList<BoundType>", "nullable": false, "child_kind": null, "update": false },
+        { "name": "ReturnType",      "type": "BoundType",               "nullable": false, "child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundMethodGroupConversion",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "Names a method for delegate conversion. Receiver is the bound instance (null = static target / ldnull; a closure trampoline binds the display instance). <receiver>/ldftn/newobj.",
+      "fields": [
+        { "name": "FunctionName",  "type": "string",          "nullable": false, "child_kind": null,   "update": false },
+        { "name": "ParameterCount","type": "int",             "nullable": false, "child_kind": null,   "update": false },
+        { "name": "DelegateType",  "type": "BoundType",       "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Receiver",      "type": "BoundExpression", "nullable": true,  "child_kind": "expr", "update": true  }
+      ]
+    },
+
+    {
+      "comment": "=== POINTER EXPRESSIONS — CORE (from BoundPointerNodes.cs) ===",
+      "name": "BoundAddressOfVariableExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "result type = ByRefBoundType(PointeeType)",
+      "fields": [
+        { "name": "Target",      "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "PointeeType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundHeapAllocExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "result type = HeapPointerBoundType(PointeeType)",
+      "fields": [
+        { "name": "Inner",       "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "PointeeType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "comment": "=== EXPRESSIONS — CORE (direct mechanical emit) ===",
+      "name": "BoundInterpolatedStringExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "note": "CORE leaf — CodeGen emits string.Concat(object[]) directly (EmitInterpolatedExpression), boxing value-type holes, exactly as ESC does. No lowering: a hole's own FEATURE nodes are lowered by the rewriter descending into each part's Expr. Parts is IReadOnlyList<BoundInterpolationPart>.",
+      "fields": [
+        { "name": "Parts", "type": "IReadOnlyList<BoundInterpolationPart>","nullable": false, "child_kind": "interp_part_list", "update": true },
+        { "name": "Type",  "type": "BoundType",                           "nullable": false, "child_kind": null,                "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundConditionalExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ExpressionFormLowering",
+      "fields": [
+        { "name": "Condition",   "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Consequence", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Alternative", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Type",        "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundNullCoalescingExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "NullFlowLowering",
+      "fields": [
+        { "name": "Left",  "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Right", "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Type",  "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundNullConditionalAccessExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "NullFlowLowering",
+      "fields": [
+        { "name": "Target",     "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "MemberName", "type": "string",          "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Type",       "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundListLiteralExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "StringLowering",
+      "fields": [
+        { "name": "Elements",    "type": "IReadOnlyList<BoundExpression>", "nullable": false, "child_kind": "expr_list", "update": true },
+        { "name": "ElementType", "type": "BoundType",                     "nullable": false, "child_kind": null,        "update": true },
+        { "name": "Type",        "type": "BoundType",                     "nullable": false, "child_kind": null,        "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundRangeExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ForEachLowering",
+      "fields": [
+        { "name": "Target", "type": "BoundExpression", "nullable": true,  "child_kind": "expr", "update": true },
+        { "name": "Start",  "type": "BoundExpression", "nullable": true,  "child_kind": "expr", "update": true },
+        { "name": "End",    "type": "BoundExpression", "nullable": true,  "child_kind": "expr", "update": true },
+        { "name": "Type",   "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundSpawnExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ConcurrencyLowering",
+      "fields": [
+        { "name": "Body",              "type": "BoundBlockStatement",              "nullable": false, "child_kind": "block", "update": true  },
+        { "name": "CapturedVariables", "type": "IReadOnlyList<BoundCapturedVariable>","nullable": false,"child_kind": null, "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundChanCreationExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ConcurrencyLowering",
+      "fields": [
+        { "name": "ElementType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "Capacity",    "type": "BoundExpression", "nullable": true,  "child_kind": "expr", "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundDotCaseExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "MatchLowering",
+      "fields": [
+        { "name": "CaseName",        "type": "string",                           "nullable": false, "child_kind": null,        "update": false },
+        { "name": "ResolvedTypeName","type": "string",                           "nullable": false, "child_kind": null,        "update": false },
+        { "name": "Arguments",       "type": "IReadOnlyList<BoundExpression>",   "nullable": false, "child_kind": "expr_list", "update": true  },
+        { "name": "Type",            "type": "BoundType",                        "nullable": false, "child_kind": null,        "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundTryUnwrapExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ResultLowering",
+      "fields": [
+        { "name": "Inner",         "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "UnwrappedType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "TempName",      "type": "string",          "nullable": false, "child_kind": null,   "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundWithExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "WithLowering",
+      "fields": [
+        { "name": "Target", "type": "BoundExpression",          "nullable": false, "child_kind": "expr",           "update": true },
+        { "name": "Fields", "type": "IReadOnlyList<BoundFieldInit>","nullable": false,"child_kind": "field_init_list","update": true },
+        { "name": "Type",   "type": "BoundType",                "nullable": false, "child_kind": null,             "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundResultCallExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ResultLowering",
+      "fields": [
+        { "name": "IsOk",      "type": "bool",          "nullable": false, "child_kind": null,   "update": false },
+        { "name": "Argument",  "type": "BoundExpression","nullable": false, "child_kind": "expr", "update": true  },
+        { "name": "OkType",    "type": "BoundType",     "nullable": false, "child_kind": null,   "update": true  },
+        { "name": "ErrorType", "type": "BoundType",     "nullable": false, "child_kind": null,   "update": true  }
+      ]
+    },
+
+    {
+      "name": "BoundFunctionLiteralExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ClosureConversion",
+      "fields": [
+        { "name": "Parameters",       "type": "IReadOnlyList<BoundParameter>",     "nullable": false, "child_kind": null,    "update": true  },
+        { "name": "ReturnType",       "type": "BoundType",                         "nullable": false, "child_kind": null,    "update": true  },
+        { "name": "Body",             "type": "BoundBlockStatement",               "nullable": false, "child_kind": "block", "update": true  },
+        { "name": "CapturedVariables","type": "IReadOnlyList<BoundCapturedVariable>","nullable": false,"child_kind": null,   "update": true  },
+        { "name": "IsFunctionPointer","type": "bool",                              "nullable": false, "child_kind": null,    "update": false },
+        { "name": "IsAsync",          "type": "bool",                              "nullable": false, "child_kind": null,    "update": false },
+        { "name": "AsyncShape",       "type": "AsyncReturnShape",                  "nullable": false, "child_kind": null,    "update": false }
+      ]
+    },
+
+    {
+      "name": "BoundAwaitExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "AsyncLowering",
+      "fields": [
+        { "name": "Inner",      "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "ResultType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
+      "name": "BoundMatchExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "MatchLowering",
+      "note": "Arms is IReadOnlyList<BoundMatchExpressionArm>; each arm has Pattern + Guard? + Value. Rewriter handles per-arm.",
+      "fields": [
+        { "name": "Subject",     "type": "BoundExpression",                    "nullable": false, "child_kind": "expr",             "update": true  },
+        { "name": "SubjectType", "type": "BoundType",                          "nullable": false, "child_kind": null,               "update": true  },
+        { "name": "Arms",        "type": "IReadOnlyList<BoundMatchExpressionArm>","nullable": false,"child_kind": "match_expr_arm_list","update": true }
+      ]
+    },
+
+    {
+      "name": "BoundIfExpression",
+      "tier": "FEATURE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "lowered_by": "ExpressionFormLowering",
+      "note": "Branches is IReadOnlyList<BoundIfExpressionBranch>; each has Condition + Body (stmts) + Value?.",
+      "fields": [
+        { "name": "Branches",  "type": "IReadOnlyList<BoundIfExpressionBranch>","nullable": false, "child_kind": "if_expr_branch_list","update": true  },
+        { "name": "ElseBody",  "type": "IReadOnlyList<BoundStatement>",         "nullable": false, "child_kind": "stmt_list",         "update": true  },
+        { "name": "ElseValue", "type": "BoundExpression",                       "nullable": true,  "child_kind": "expr",              "update": true  },
+        { "name": "Type",      "type": "BoundType",                             "nullable": false, "child_kind": null,                "update": true  }
+      ]
+    },
+
+    {
+      "comment": "=== SUPPORTING (plain records, not BoundNode; used within node fields) ===",
+      "name": "BoundField",
+      "tier": "CORE",
+      "category": "Supporting",
+      "base": null,
+      "note": "Plain record, not a BoundNode. Fields carry optional DefaultValue expressions walked by the visitor."
+    },
+
+    {
+      "name": "BoundParameter",
+      "tier": "CORE",
+      "category": "Supporting",
+      "base": null,
+      "note": "Plain record. DefaultValue? is a BoundExpression; walked at function/init declaration boundaries."
+    },
+
+    {
+      "name": "BoundChoiceCase",      "tier": "CORE", "category": "Supporting", "base": null },
+    { "name": "BoundEnumCase",        "tier": "CORE", "category": "Supporting", "base": null },
+    { "name": "BoundFieldInit",       "tier": "CORE", "category": "Supporting", "base": null,
+      "note": "Value is a BoundExpression — walked via RewriteFieldInits / VisitExpression(f.Value)." },
+    { "name": "BoundMatchArm",        "tier": "FEATURE", "category": "Supporting", "base": null,
+      "note": "Guard? + Body (block) are walked by the rewriter inside BoundMatchStatement's special child_kind." },
+    { "name": "BoundMatchExpressionArm","tier": "FEATURE", "category": "Supporting", "base": null,
+      "note": "Guard? + Value (expr) walked inside BoundMatchExpression." },
+    { "name": "BoundMatchBinding",    "tier": "FEATURE", "category": "Supporting", "base": null },
+    { "name": "BoundMatchPattern",    "tier": "FEATURE", "category": "Supporting", "base": null,
+      "note": "LiteralValue? is a BoundExpression but is not currently walked by the rewriter (binder proves it constant)." },
+    { "name": "BoundCapturedVariable","tier": "FEATURE", "category": "Supporting", "base": null },
+    { "name": "BoundInterpolationPart","tier": "CORE","category": "Supporting", "base": null,
+      "note": "Expr? is walked inside BoundInterpolatedStringExpression via the interp_part_list child_kind." },
+    { "name": "BoundSelectArm",       "tier": "FEATURE", "category": "Supporting", "base": null,
+      "note": "Channel? + Value? + Body walked inside BoundSelectStatement via select_arm_list." },
+    { "name": "BoundIfExpressionBranch","tier": "FEATURE","category": "Supporting","base": null,
+      "note": "Condition + Body (stmts) + Value? walked inside BoundIfExpression via if_expr_branch_list." },
+    { "name": "BoundInterfaceMethod", "tier": "CORE", "category": "Supporting", "base": null },
+    { "name": "BoundInterfaceProperty","tier": "CORE","category": "Supporting", "base": null },
+    { "name": "BoundCatchClause",     "tier": "CORE", "category": "Supporting", "base": null,
+      "note": "Body (block) + Guard? walked inside BoundTryStatement via catch_list." }
+  ],
+
+  "child_kind_registry": {
+    "description": "How each child_kind is handled during code generation of Visit / Rewrite methods.",
+    "expr":               "Single BoundExpression — VisitExpression / RewriteExpression.",
+    "stmt":               "Single BoundStatement — VisitStatement / RewriteStatement.",
+    "block":              "BoundBlockStatement — VisitBlockStatement / RewriteBlock.",
+    "expr_list":          "IReadOnlyList<BoundExpression> — VisitExpression loop / RewriteExpressions helper.",
+    "stmt_list":          "IReadOnlyList<BoundStatement> — VisitStatement loop / RewriteStatements helper.",
+    "field_init_list":    "IReadOnlyList<BoundFieldInit> — VisitExpression(f.Value) loop / RewriteFieldInits helper.",
+    "member":             "BoundMember or IReadOnlyList<BoundFunctionDeclaration> — VisitMember / VisitFunctionDeclaration loop.",
+    "catch_list":         "IReadOnlyList<BoundCatchClause> — per-clause Body+Guard walk; special inline logic in rewriter.",
+    "match_arm_list":     "IReadOnlyList<BoundMatchArm> — per-arm Guard?+Body walk; special inline logic.",
+    "match_expr_arm_list":"IReadOnlyList<BoundMatchExpressionArm> — per-arm Guard?+Value walk.",
+    "select_arm_list":    "IReadOnlyList<BoundSelectArm> — per-arm Channel?+Value?+Body walk.",
+    "interp_part_list":   "IReadOnlyList<BoundInterpolationPart> — per-part Expr? walk.",
+    "if_expr_branch_list":"IReadOnlyList<BoundIfExpressionBranch> — per-branch Condition+Body+Value? walk."
+  },
+
+  "generator_contract": {
+    "outputs": [
+      "BoundTreeVisitor.cs  — BoundTreeVisitor (void walk) + BoundTreeVisitor<T> (typed fold)",
+      "BoundTreeRewriter.cs — BoundTreeRewriter (identity rewriter; derive + override to transform)",
+      "BoundNodes.Update.cs — partial record extensions, one Update() per node with update fields"
+    ],
+    "update_identity_rule": "If all arguments are ReferenceEquals to their originals (and value-equal for bool/int/enum), return this; else return this with { ... }.",
+    "span_not_in_update": "Span is never an Update parameter — it propagates unchanged from the original node.",
+    "boundtype_ref_equals": "BoundType fields in Update are compared with ReferenceEquals, not structural equality, to avoid graph cycles via TypeSymbol.BoundView.",
+    "rewriter_no_alloc_on_identity": "Rewrite methods check ReferenceEquals on every rewritten child before constructing a new node. If nothing changed, return the original reference.",
+    "feature_assert_subclass": "A post-lowering BoundFeatureAssert rewriter (in Esharp.Lowering) overrides every FEATURE Visit to throw InvalidOperationException(\"FEATURE node <T> reached CodeGen\")."
+  }
+}

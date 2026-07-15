@@ -1,9 +1,87 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    The E# compiler — ONE assembly, phases as folders (the Roslyn layout:
+    Microsoft.CodeAnalysis.CSharp.csproj over Binder/, BoundTree/, Lowering/,
+    CodeGen/, Emitter/, …). The pipeline is:
+
+        Syntax → Binder (+ FlowAnalysis) → Lowering → CodeGen (+ Emit) → Compilation
+
+    Every phase keeps its own namespace (Esharp.Syntax, Esharp.Binder,
+    Esharp.CodeGen, …) under the matching subfolder; namespace ≠ assembly. The
+    foundational layers (Syntax ↔ Diagnostics, BoundTree ↔ Symbols, the binder-tap
+    Semantics sink) are co-recursive, and the pipeline stages mutate `internal set`
+    symbol members across phases — both reasons the old per-phase-assembly split
+    forced everything `public` and demanded project-reference cycle gymnastics
+    (BoundProgram placed to dodge a Lowering→Compilation cycle). As one assembly the
+    cycles dissolve and the layering ("Lowering must not reference Compilation") is
+    held by folder discipline, exactly as Roslyn does it.
+
+    The only edges out of this assembly are the NuGet metadata/IL libraries below.
+    Esharp.Stdlib is loaded by metadata name when compiling E# programs; it is not a
+    C# project reference because the stdlib itself is compiled by this compiler. Cli,
+    Stdlib (.esproj), LanguageServer
+    (.esproj), Build/Sdk/Templates, and tests are consumers and stay separate.
+  -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>Esharp.Compiler</AssemblyName>
+    <RootNamespace>Esharp.Compiler</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Mono.Cecil: the PE/PDB writer + metadata-reference types. Owned by the
+         Emit/ and Metadata/ folders; nothing else emits IL or reads metadata. -->
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+    <!-- ILVerify: the oracle gate (CodeGen/ILVerification.cs). -->
+    <PackageReference Include="Microsoft.ILVerification" Version="10.0.8" />
+    <!-- Roslyn: the mixed-language (C# half-declare + emit) path in Compilation/. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
+    <!-- ILRepack: mixed-assembly fusion in Compilation/AssemblyFuser.cs. -->
+    <PackageReference Include="ILRepack.Lib" Version="2.0.45" />
+  </ItemGroup>
+
+  <!-- Global usings the Binder/FlowAnalysis/Lowering sources rely on (they were
+       authored against the monolith's single namespace). Folder-local namespaces
+       resolve fine; these just spare the pipeline files a wall of per-file usings. -->
+  <ItemGroup>
+    <Using Include="Esharp.BoundTree" />
+    <Using Include="Esharp.Symbols" />
+    <Using Include="Esharp.Syntax" />
+    <Using Include="Esharp.Diagnostics" />
+    <Using Include="Esharp.Compiler" />
+    <Using Include="Esharp.Lowering" />
+    <Using Include="Esharp.FlowAnalysis" />
+    <Using Include="Esharp.Diagnostics.Semantics" Alias="Semantics" />
+    <Using Include="Esharp.Syntax.Parsing" Alias="Parsing" />
+  </ItemGroup>
+
+  <!-- Single assembly now → the internal symbol/binder surface is genuinely
+       internal again. Re-expose it to the test assemblies only. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Esharp.Tests" />
+    <InternalsVisibleTo Include="Esharp.FuzzTests" />
+  </ItemGroup>
+
+  <!--
+    BoundTree/BoundTreeVisitor.cs, BoundTreeRewriter.cs, BoundNodes.Update.cs are
+    generated from BoundTree/bound-nodes.schema.json by BoundTree/bound-nodes-gen.py.
+    Run the generator before every compile so the visitor/rewriter/Update boilerplate
+    can never drift from the schema. Incremental: regenerates only when the schema or
+    generator is newer than the outputs.
+  -->
+  <PropertyGroup>
+    <BoundTreeDir>$(MSBuildThisFileDirectory)BoundTree</BoundTreeDir>
+  </PropertyGroup>
+  <Target Name="GenerateBoundNodes"
+          BeforeTargets="BeforeCompile;CoreCompile"
+          Inputs="$(BoundTreeDir)\bound-nodes.schema.json;$(BoundTreeDir)\bound-nodes-gen.py"
+          Outputs="$(BoundTreeDir)\BoundTreeVisitor.cs;$(BoundTreeDir)\BoundTreeRewriter.cs;$(BoundTreeDir)\BoundNodes.Update.cs">
+    <Exec Command="python3 bound-nodes-gen.py" WorkingDirectory="$(BoundTreeDir)" />
+  </Target>
 
 </Project>

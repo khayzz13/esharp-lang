@@ -1,0 +1,17 @@
+<!--
+  Makes `.esproj` a first-class .NET SDK language. Any `<Project Sdk="Microsoft.NET.Sdk">`
+  (or Microsoft.NET.Sdk.Web) with a `.esproj` extension is treated as E#: we set
+  $(LanguageTargets) to the E# targets and pull in the E# props. The .NET SDK imports
+  $(LanguageTargets) last — after the common targets — so the E# CoreCompile override
+  wins, exactly the hook F# uses for `.fsproj` (Microsoft.NET.Sdk/Sdk/Sdk.targets).
+
+  Gated on the project extension, so the repo's .csproj projects see a no-op.
+-->
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.esproj'">
+    <LanguageTargets>$(MSBuildThisFileDirectory)src\Esharp.Sdk\Esharp.NetSdk.targets</LanguageTargets>
+  </PropertyGroup>
+
+  <Import Project="$(MSBuildThisFileDirectory)src\Esharp.Sdk\Esharp.NetSdk.props"
+          Condition="'$(MSBuildProjectExtension)' == '.esproj'" />
+</Project>

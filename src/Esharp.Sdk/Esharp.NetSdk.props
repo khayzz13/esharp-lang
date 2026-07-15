@@ -1,0 +1,36 @@
+<!--
+  E# language props for the .NET SDK, mirroring Microsoft.FSharp.NetSdk.props. Wired to
+  every `.esproj` by Directory.Build.props (props phase), so an .esproj is a normal
+  `<Project Sdk="Microsoft.NET.Sdk">` and this file supplies the E#-specific item globs
+  and language settings. The compile itself is Esharp.NetSdk.targets, set as
+  $(LanguageTargets) so the SDK imports it after the common targets (CoreCompile override
+  wins) — the same hook F# uses.
+-->
+<Project>
+  <PropertyGroup>
+    <Language>E#</Language>
+    <DefaultLanguageSourceExtension>.es</DefaultLanguageSourceExtension>
+    <!-- Don't let the C# SDK glob *.cs into @(Compile); E# owns its sources below. -->
+    <EnableDefaultItems Condition="'$(EnableDefaultItems)' == ''">false</EnableDefaultItems>
+    <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
+    <DebugSymbols Condition="'$(DebugSymbols)' == ''">true</DebugSymbols>
+    <!-- Implicit (standard BCL namespace) usings. Honor the conventional
+         <ImplicitUsings>enable|disable</ImplicitUsings>, falling back to true. -->
+    <EnableImplicitUsings Condition="'$(EnableImplicitUsings)' == '' and ('$(ImplicitUsings)' == 'disable' or '$(ImplicitUsings)' == 'false')">false</EnableImplicitUsings>
+    <EnableImplicitUsings Condition="'$(EnableImplicitUsings)' == ''">true</EnableImplicitUsings>
+    <!-- E# is the only compile; suppress C# CoreCompile and the ref-assembly pass. -->
+    <CoreCompileDependsOn />
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EsharpSource Include="**/*.es"
+                  Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <!-- Mixed-language opt-in: <IncludeCSharp>true</IncludeCSharp> compiles the project's
+         .cs sources alongside the .es ones — both flow through the Workspace, which fuses
+         the Roslyn half into the one assembly. -->
+    <EsharpSource Include="**/*.cs"
+                  Condition="'$(IncludeCSharp)' == 'true'"
+                  Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+</Project>

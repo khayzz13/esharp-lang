@@ -1,0 +1,55 @@
+<!--
+  E# $(LanguageTargets) for the .NET SDK, mirroring how Microsoft.FSharp.Targets hooks the
+  build: import Microsoft.Common.targets for the standard pipeline (ResolveReferences,
+  CopyFilesToOutputDirectory, …), then override CoreCompile to run the E# compiler. The
+  SDK imports this file last (after setting $(LanguageTargets) to it in Directory.Build.props),
+  so these definitions win over any default.
+-->
+<Project>
+  <!-- The EsharpCompile task assembly. In-repo it is the Esharp.Build build output; the
+       packaged SDK ships it under tools/. Prefer whichever exists. -->
+  <PropertyGroup>
+    <_EsharpBuildTaskAssembly Condition="'$(_EsharpBuildTaskAssembly)' == '' and Exists('$(MSBuildThisFileDirectory)..\Esharp.Build\bin\$(Configuration)\net10.0\Esharp.Build.dll')">$(MSBuildThisFileDirectory)..\Esharp.Build\bin\$(Configuration)\net10.0\Esharp.Build.dll</_EsharpBuildTaskAssembly>
+    <_EsharpBuildTaskAssembly Condition="'$(_EsharpBuildTaskAssembly)' == '' and Exists('$(MSBuildThisFileDirectory)..\Esharp.Build\bin\Debug\net10.0\Esharp.Build.dll')">$(MSBuildThisFileDirectory)..\Esharp.Build\bin\Debug\net10.0\Esharp.Build.dll</_EsharpBuildTaskAssembly>
+    <_EsharpBuildTaskAssembly Condition="'$(_EsharpBuildTaskAssembly)' == ''">$(MSBuildThisFileDirectory)tools\net10.0\Esharp.Build.dll</_EsharpBuildTaskAssembly>
+  </PropertyGroup>
+
+  <UsingTask TaskName="Esharp.Build.EsharpCompile" AssemblyFile="$(_EsharpBuildTaskAssembly)" />
+
+  <!-- The standard managed build pipeline. -->
+  <Import Project="$(MSBuildToolsPath)\Microsoft.Common.targets" />
+
+  <!-- Stub required by Microsoft.Common.targets for non-C#/VB languages. -->
+  <Target Name="CreateManifestResourceNames" />
+
+  <!-- The .NET SDK's IgnoreJavaScriptOutputAssembly treats every '.esproj' as a JS/TS
+       project that "never produces an assembly" and forces ReferenceOutputAssembly=false
+       on references to one. E# esproj DO produce assemblies; override it with an empty
+       body so project-to-project assembly references behave normally. -->
+  <Target Name="IgnoreJavaScriptOutputAssembly" />
+
+  <!-- Override CoreCompile to invoke the E# compiler over @(EsharpSource). -->
+  <Target Name="CoreCompile" DependsOnTargets="ResolveReferences">
+    <EsharpCompile
+      Sources="@(EsharpSource)"
+      References="@(ReferencePath)"
+      FrameworkReferences="@(FrameworkReference)"
+      OutputAssembly="$(IntermediateOutputPath)$(AssemblyName).dll"
+      AssemblyName="$(AssemblyName)"
+      OutputType="$(OutputType)"
+      EnableImplicitUsings="$(EnableImplicitUsings)"
+      DebugSymbols="$(DebugSymbols)" />
+
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).pdb"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(IntermediateOutputPath)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).runtimeconfig.json"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(IntermediateOutputPath)$(AssemblyName).runtimeconfig.json')" />
+  </Target>
+</Project>

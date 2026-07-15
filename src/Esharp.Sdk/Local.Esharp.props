@@ -1,0 +1,47 @@
+<!--
+  Local development E# props. Use with Local.Esharp.targets.
+
+  Usage in .esproj:
+    <Project>
+      <Import Project="path/to/Local.Esharp.props" />
+      <Import Project="path/to/Local.Esharp.targets" />
+    </Project>
+-->
+<Project>
+  <PropertyGroup>
+    <!-- Base SDK selection: console/library by default, web with
+         <EsharpSdkBase>Microsoft.NET.Sdk.Web</EsharpSdkBase> (set before this import). -->
+    <EsharpSdkBase Condition="'$(EsharpSdkBase)' == ''">Microsoft.NET.Sdk</EsharpSdkBase>
+  </PropertyGroup>
+
+  <Import Project="Sdk.props" Sdk="$(EsharpSdkBase)" />
+
+  <PropertyGroup>
+    <Language>E#</Language>
+    <DefaultLanguageSourceExtension>.es</DefaultLanguageSourceExtension>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net10.0</TargetFramework>
+    <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
+    <DebugSymbols Condition="'$(DebugSymbols)' == ''">true</DebugSymbols>
+    <!-- Implicit (standard BCL namespace) usings. Honor the conventional
+         <ImplicitUsings>enable|disable</ImplicitUsings>, falling back to true.
+         When false, unqualified names resolve only from exact/qualified matches
+         and explicit `using`s. -->
+    <EnableImplicitUsings Condition="'$(EnableImplicitUsings)' == '' and ('$(ImplicitUsings)' == 'disable' or '$(ImplicitUsings)' == 'false')">false</EnableImplicitUsings>
+    <EnableImplicitUsings Condition="'$(EnableImplicitUsings)' == ''">true</EnableImplicitUsings>
+    <!-- Suppress C# compilation and reference assembly generation -->
+    <CoreCompileDependsOn />
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EsharpSource Include="**/*.es"
+                  Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    <!-- Mixed-language opt-in: <IncludeCSharp>true</IncludeCSharp> compiles the
+         project's .cs sources alongside the .es ones. Every source flows through
+         the Workspace, which fuses the Roslyn half into the one assembly. -->
+    <EsharpSource Include="**/*.cs"
+                  Condition="'$(IncludeCSharp)' == 'true'"
+                  Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,48 @@
+<!--
+  Local development E# targets. Companion to Local.Esharp.props.
+  Resolves the EsharpCompile task from the Esharp.Build project's build output.
+-->
+<Project>
+  <Import Project="Sdk.targets" Sdk="$(EsharpSdkBase)" />
+
+  <PropertyGroup>
+    <_EsharpBuildDir>$(MSBuildThisFileDirectory)../Esharp.Build/bin/Debug/net10.0/</_EsharpBuildDir>
+  </PropertyGroup>
+
+  <UsingTask TaskName="Esharp.Build.EsharpCompile"
+             AssemblyFile="$(_EsharpBuildDir)Esharp.Build.dll" />
+
+  <!-- Stubs required by Microsoft.Common.targets for non-C#/VB languages -->
+  <Target Name="CreateManifestResourceNames" />
+
+  <!-- The .NET SDK ships IgnoreJavaScriptOutputAssembly (Microsoft.Common.CurrentVersion.targets):
+       it treats every '.esproj' as a JavaScript/TypeScript project that "never produces an
+       assembly" and forces ReferenceOutputAssembly=false on any P2P reference to one. E# esproj
+       DO produce assemblies, so overriding that target with an empty body restores normal
+       project-to-project assembly references between E# projects. -->
+  <Target Name="IgnoreJavaScriptOutputAssembly" />
+
+  <Target Name="CoreCompile" DependsOnTargets="ResolveReferences">
+    <EsharpCompile
+      Sources="@(EsharpSource)"
+      References="@(ReferencePath)"
+      FrameworkReferences="@(FrameworkReference)"
+      OutputAssembly="$(IntermediateOutputPath)$(AssemblyName).dll"
+      AssemblyName="$(AssemblyName)"
+      OutputType="$(OutputType)"
+      EnableImplicitUsings="$(EnableImplicitUsings)"
+      DebugSymbols="$(DebugSymbols)" />
+
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).pdb"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(IntermediateOutputPath)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).runtimeconfig.json"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(IntermediateOutputPath)$(AssemblyName).runtimeconfig.json')" />
+  </Target>
+</Project>

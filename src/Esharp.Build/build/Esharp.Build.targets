@@ -1,0 +1,4 @@
+<Project>
+  <UsingTask TaskName="Esharp.Build.EsharpCompile"
+             AssemblyFile="$(MSBuildThisFileDirectory)../lib/net10.0/Esharp.Build.dll" />
+</Project>

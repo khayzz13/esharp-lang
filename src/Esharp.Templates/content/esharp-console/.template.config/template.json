@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "E#",
+  "classifications": ["Console"],
+  "identity": "Esharp.Templates.Console",
+  "name": "E# Console Application",
+  "shortName": "esharp",
+  "sourceName": "HelloEsharp",
+  "tags": {
+    "language": "E#",
+    "type": "project"
+  }
+}

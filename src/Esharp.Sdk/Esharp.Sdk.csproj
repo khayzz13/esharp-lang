@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <NoBuild>true</NoBuild>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <IsPackable>true</IsPackable>
+    <PackageId>Esharp.Sdk</PackageId>
+    <PackageVersion>0.1.0</PackageVersion>
+    <Description>E# language SDK for .NET</Description>
+    <PackageType>MSBuildSdk</PackageType>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+  </PropertyGroup>
+
+  <!-- Pack the Sdk props/targets into the right NuGet layout -->
+  <ItemGroup>
+    <None Include="Sdk/Sdk.props" Pack="true" PackagePath="Sdk/" />
+    <None Include="Sdk/Sdk.targets" Pack="true" PackagePath="Sdk/" />
+  </ItemGroup>
+
+</Project>

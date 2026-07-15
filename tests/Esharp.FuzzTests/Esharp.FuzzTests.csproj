@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <StartupObject>Esharp.FuzzTests.Program</StartupObject>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Mono.Cecil" Version="0.11.*" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Esharp.Compiler\Esharp.Compiler.csproj" />
+    <ProjectReference Include="..\..\src\Esharp.Stdlib\Esharp.Stdlib.esproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Target Name="CopyEsharpStdlib" AfterTargets="Build"
+          Inputs="..\..\src\Esharp.Stdlib\bin\$(Configuration)\net10.0\Esharp.Stdlib.dll"
+          Outputs="$(OutDir)Esharp.Stdlib.dll">
+    <Copy SourceFiles="..\..\src\Esharp.Stdlib\bin\$(Configuration)\net10.0\Esharp.Stdlib.dll"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="..\..\src\Esharp.Stdlib\bin\$(Configuration)\net10.0\Esharp.Stdlib.pdb"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
+          Condition="Exists('..\..\src\Esharp.Stdlib\bin\$(Configuration)\net10.0\Esharp.Stdlib.pdb')" />
+  </Target>
+
+</Project>

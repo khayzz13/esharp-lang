@@ -1,4 +1,15 @@
+# .NET and E# build output
 bin/
 obj/
-*.pdb
 *.dll
+*.pdb
+TestResults/
+fuzz-out/
+
+# User and editor state
+.DS_Store
+.vs/
+.idea/
+.vscode/
+*.suo
+*.user

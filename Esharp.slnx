@@ -1,17 +1,15 @@
 <Solution>
-  <Folder Name="/samples/">
-    <Project Path="samples/AuthDemo/AuthDemo.csproj" />
-    <Project Path="samples/ParserDemo/ParserDemo.csproj" />
-    <Project Path="samples/MultiFile/MultiFile.csproj" />
-  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Esharp.Build/Esharp.Build.csproj" />
     <Project Path="src/Esharp.Cli/Esharp.Cli.csproj" />
     <Project Path="src/Esharp.Compiler/Esharp.Compiler.csproj" />
-    <Project Path="src/Esharp.Runtime/Esharp.Runtime.csproj" />
-    <Project Path="src/Esharp.ILEmit/Esharp.ILEmit.csproj" />
+    <Project Path="src/Esharp.Sdk/Esharp.Sdk.csproj" />
+    <Project Path="src/Esharp.Templates/Esharp.Templates.csproj" />
+    <Project Path="src/Esharp.LanguageServer/Esharp.LanguageServer.esproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Esharp.FuzzTests/Esharp.FuzzTests.csproj" />
     <Project Path="tests/Esharp.Tests/Esharp.Tests.csproj" />
+    <Project Path="tests/Esharp.LanguageServer.Tests/Esharp.LanguageServer.Tests.esproj" />
   </Folder>
 </Solution>

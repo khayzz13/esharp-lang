@@ -238,7 +238,9 @@ public sealed class IteratorLowering : IBoundTreePass
         // (_state, Current, params) come first; then the two we just added.
         var iterFields = iterSym.Fields
             .Select(f => new BoundField(f.Name, f.Bound ?? new PrimitiveType("object"),
-                IsPublic: f.IsPublic, Mutable: true))
+                IsPublic: f.IsPublic, Mutable: true,
+                IsProperty: f.Name == "Current",
+                PropHasSet: f.Name == "Current"))
             .ToList();
 
         var ctType = new ExternalType("CancellationToken");
@@ -308,8 +310,8 @@ public sealed class IteratorLowering : IBoundTreePass
                 // IAsyncEnumerable<T> — satisfied by GetAsyncEnumerator
                 new ExternalType("IAsyncEnumerable", [elemType]),
                 // IAsyncEnumerator<T> : IAsyncDisposable — satisfied by MoveNextAsync +
-                // Current (field) + DisposeAsync. Current satisfies the interface getter
-                // requirement via field-satisfies-property synthesis in CodeGen.
+                // the compiler-declared Current property + DisposeAsync. Generated code
+                // follows the same field/property ABI boundary as authored source.
                 new ExternalType("IAsyncEnumerator", [elemType]),
                 // Declare the inherited interface explicitly as well. Reflection's
                 // interface method enumeration omits inherited members, while the

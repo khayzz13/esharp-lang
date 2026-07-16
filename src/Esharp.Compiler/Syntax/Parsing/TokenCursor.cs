@@ -79,6 +79,35 @@ sealed class TokenCursor
         return current;
     }
 
+    /// Consume one generic-closing '>' even when the lexer greedily formed a
+    /// shift token. Type grammar owns this contextual split: `Box<List<int>>`
+    /// is two closers, while expression grammar still sees `value >> count`.
+    public SyntaxToken ConsumeTypeGreater(string? message = null)
+    {
+        if (Current.Kind == SyntaxTokenKind.Greater)
+            return Next();
+
+        var current = Current;
+        var remainder = current.Kind switch
+        {
+            SyntaxTokenKind.ShiftRight => new SyntaxToken(SyntaxTokenKind.Greater, ">",
+                current.Position + 1, current.Line, current.Column + 1),
+            SyntaxTokenKind.UnsignedShiftRight => new SyntaxToken(SyntaxTokenKind.ShiftRight, ">>",
+                current.Position + 1, current.Line, current.Column + 1),
+            _ => default,
+        };
+        if (remainder != default)
+        {
+            var consumed = new SyntaxToken(SyntaxTokenKind.Greater, ">", current.Position,
+                current.Line, current.Column, current.LeadingTrivia);
+            _tokens[_position] = remainder;
+            _lastConsumed = consumed;
+            return consumed;
+        }
+
+        return Match(SyntaxTokenKind.Greater, message);
+    }
+
     public SyntaxToken Match(SyntaxTokenKind kind, string? message = null)
     {
         if (Current.Kind == kind)
@@ -140,4 +169,7 @@ sealed class TokenCursor
 
     public void Report(int line, int column, string message) =>
         _diagnostics.Report(_filePath, line, column, message);
+
+    public void Report(int line, int column, DiagnosticDescriptor descriptor, params object[] args) =>
+        _diagnostics.Report(new SourceSpan(_filePath, line, column), descriptor, args);
 }

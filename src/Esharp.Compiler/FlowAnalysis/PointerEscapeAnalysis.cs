@@ -46,11 +46,11 @@ internal static class PointerEscapeAnalysis
     /// constrains every caller, including callers declared in another file.
     /// </summary>
     public static IReadOnlyList<BoundCompilationUnit> Run(
-        IReadOnlyList<BoundCompilationUnit> units, DiagnosticBag diagnostics)
+        IReadOnlyList<BoundCompilationUnit> units, DiagnosticBag diagnostics, bool showAllocations = false)
     {
         if (units.Count == 0) return units;
         var members = units.SelectMany(unit => unit.Members).ToList();
-        var rewritten = RunMembers(members, diagnostics);
+        var rewritten = RunMembers(members, diagnostics, showAllocations);
 
         // RunMembers preserves member order. Re-slice the result onto the
         // original units rather than flattening the compilation into one host.
@@ -65,7 +65,7 @@ internal static class PointerEscapeAnalysis
         return result;
     }
 
-    static List<BoundMember> RunMembers(List<BoundMember> members, DiagnosticBag diagnostics)
+    static List<BoundMember> RunMembers(List<BoundMember> members, DiagnosticBag diagnostics, bool showAllocations)
     {
         var funcs = Flatten(members).ToList();
         if (funcs.Count == 0) return members;
@@ -149,7 +149,14 @@ internal static class PointerEscapeAnalysis
         // rewritten functions back into the member tree.
         var rewritten = new Dictionary<BoundFunctionDeclaration, BoundFunctionDeclaration>(ReferenceEqualityComparer.Instance);
         foreach (var f in funcs)
+        {
+            if (showAllocations)
+                for (var i = 0; i < f.Parameters.Count; i++)
+                    if (wrapper[f][i] && !f.Parameters[i].ReadOnlyByRef)
+                        diagnostics.Warn(f.Span, DiagnosticDescriptors.PointerPromotionAllocation,
+                            $"Pointer parameter '{f.Parameters[i].Name}' requires a heap-backed cell because it escapes or is nullable.");
             rewritten[f] = RewriteFunction(f, wrapper[f]);
+        }
 
         // The address-of node records a first-class callable signature in its
         // own bound type. Retarget it after the parameter fixed point so both
@@ -168,7 +175,13 @@ internal static class PointerEscapeAnalysis
         {
             var durableAliases = MarkEscapingAddressLocals(rewritten[f], byName, wrapper);
             if (durableAliases.Count > 0)
+            {
+                if (showAllocations)
+                    foreach (var local in durableAliases.Keys)
+                        diagnostics.Warn(f.Span, DiagnosticDescriptors.PointerPromotionAllocation,
+                            $"Address of local '{local.Name}' escapes and promotes the local to a heap-backed cell.");
                 rewritten[f] = LocalLowering.RealizeEscapingAddressableLocals(rewritten[f], durableAliases);
+            }
         }
 
         // Keep malformed IL out of the diagnostic path.  The optimizer normally

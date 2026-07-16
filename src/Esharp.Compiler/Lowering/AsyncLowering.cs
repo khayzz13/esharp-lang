@@ -297,7 +297,7 @@ public sealed class AsyncLowering : IBoundTreePass
             Body:           moveNextBody,
             Attributes:     [],
             HasAwait:       false)
-        { Symbol = moveNextSym };
+        { Symbol = moveNextSym, ContractFma = fn.ContractFma };
 
         // Instance methods carry the receiver as bound-param[0] (CodeGen drops it with
         // Skip(1) and lets Cecil's HasThis supply `this`). SetStateMachine's real
@@ -354,6 +354,7 @@ public sealed class AsyncLowering : IBoundTreePass
         {
             Symbol = fn.Symbol,
             AsyncStateMachineType = smBoundView,
+            ContractFma = fn.ContractFma,
         };
 
         return (stub, smDecl);

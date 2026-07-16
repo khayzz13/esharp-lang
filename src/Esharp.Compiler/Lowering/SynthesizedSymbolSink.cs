@@ -190,8 +190,12 @@ public sealed class SynthesizedSymbolSink
         var sym  = _table.GetOrAdd(name, arity: 0, kind: TypeSymbolKind.Class,
             ns: SynthNs, classification: DataClassification.Class);
 
-        sym.AddField(MakeField("_state",   sym, new PrimitiveType("int")));
-        sym.AddField(MakeField("Current",  sym, elementType));
+        sym.AddField(MakeField("_state", sym, new PrimitiveType("int")));
+        var current = MakeField("Current", sym, elementType);
+        current.IsProperty = true;
+        current.Mutable = true;
+        current.HasDurablePropertyLocation = true;
+        sym.AddField(current);
 
         foreach (var (pName, pType) in parameters)
             sym.AddField(MakeField(pName, sym, pType));

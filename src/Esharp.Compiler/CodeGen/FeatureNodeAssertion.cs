@@ -309,6 +309,9 @@ internal sealed class FeatureNodeCollector
             case BoundArrayCreationExpression ac:
                 VisitExpression(ac.Size);
                 break;
+            case BoundStackAllocExpression sa:
+                VisitExpression(sa.Size);
+                break;
             case BoundOutArgumentExpression:
             case BoundAddressOfExpression:
             case BoundMethodGroupConversion:

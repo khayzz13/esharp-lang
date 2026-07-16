@@ -51,6 +51,11 @@ public sealed record FieldSymbol : IFieldSymbol
     public BoundScopedMutAccessor? ScopedMut { get; internal set; }
     public bool IsPublic { get; init; } = true;
     public Syntax.Visibility Visibility { get; init; } = Syntax.Visibility.Public;
+    /// Per-accessor visibility overrides for a property (`pub var X { priv set }`).
+    /// Null inherits the property's own <see cref="Visibility"/>; a value narrows that
+    /// one accessor's emitted `get_`/`set_` method.
+    public Syntax.Visibility? GetterVisibility { get; init; }
+    public Syntax.Visibility? SetterVisibility { get; init; }
     public bool DeclaredMutable { get; init; } = true;
     public bool Mutable { get; internal set; } = true;
     public bool IsEmbedded { get; init; }

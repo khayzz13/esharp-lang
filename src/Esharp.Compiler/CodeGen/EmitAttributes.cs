@@ -1,8 +1,10 @@
 using Mono.Cecil;
 using Esharp.Binder;
 using Esharp.Emit;
+using Esharp.Syntax;
 using Esharp.BoundTree;
 using Esharp.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace Esharp.CodeGen;
 
@@ -17,11 +19,77 @@ public static partial class CodeGenerator
     static void ApplyDefaultValueFacts(ParameterDefinition paramDef, BoundParameter param)
     {
         if (param.DefaultValue is null) return;
+
+        // An enum-valued default (`codec: Codec = .Deflate`) folds to the enum's
+        // underlying integral constant, so a C# caller sees a real optional too — the
+        // same `[Optional]` + `.param` constant a primitive-literal default gets. An
+        // enum case is not a ConstantFolder literal, so without this the parameter stays
+        // required on the C#-facing surface (the dogfood's `Write(name, build, codec)`
+        // could not be called `Write(name, build)` from C#).
+        if (param.DefaultValue is BoundDotCaseExpression { Type: EnumType enumTy } dotCase
+            && TryEnumCaseConstant(enumTy, dotCase.CaseName) is { } enumConst)
+        {
+            paramDef.Attributes |= ParameterAttributes.Optional | ParameterAttributes.HasDefault;
+            paramDef.Constant = enumConst;
+            return;
+        }
+
         if (ConstantFolder.Fold(param.DefaultValue) is { } lit)
         {
+            if (lit.Value is decimal decimalValue)
+            {
+                paramDef.Attributes |= ParameterAttributes.Optional;
+                AddDecimalConstantAttribute(paramDef, decimalValue);
+                return;
+            }
             paramDef.Attributes |= ParameterAttributes.Optional | ParameterAttributes.HasDefault;
             paramDef.Constant = lit.Value;
         }
+    }
+
+    /// The underlying integral constant of an enum case, boxed as the enum's underlying
+    /// CLR type (a `byte`-backed enum yields a `byte`, matching its `value__`), or null
+    /// when the case name is unknown. Mirrors the case-value walk in <c>EmitEnum</c>:
+    /// a bare case takes the previous value + 1, an explicit `= N` resets the running value.
+    static object? TryEnumCaseConstant(EnumType enumTy, string caseName)
+    {
+        var underlying = EnumUnderlyingClrType(
+            (enumTy.Decl.UnderlyingType as NamedTypeSyntax)?.Name ?? "int");
+        var running = 0;
+        foreach (var c in enumTy.Decl.Cases)
+        {
+            if (c.ExplicitValue is { } ev) running = ev;
+            if (c.Name == caseName) return System.Convert.ChangeType(running, underlying);
+            running += 1;
+        }
+        return null;
+    }
+
+    static void AddDecimalConstantAttribute(Mono.Cecil.ICustomAttributeProvider provider, decimal value)
+    {
+        var bits = decimal.GetBits(value);
+        var scale = (byte)((bits[3] >> 16) & 0x7f);
+        var sign = (byte)((bits[3] & unchecked((int)0x80000000)) != 0 ? 128 : 0);
+        var ctor = typeof(DecimalConstantAttribute).GetConstructor(
+            [typeof(byte), typeof(byte), typeof(uint), typeof(uint), typeof(uint)])!;
+        var module = provider switch
+        {
+            ParameterDefinition parameter => parameter.ParameterType.Module,
+            FieldDefinition field => field.FieldType.Module,
+            _ => throw new InvalidOperationException("decimal constant metadata requires a field or parameter")
+        };
+        var attribute = new CustomAttribute(module.ImportReference(ctor));
+        attribute.ConstructorArguments.Add(new CustomAttributeArgument(
+            attribute.Constructor.Parameters[0].ParameterType, scale));
+        attribute.ConstructorArguments.Add(new CustomAttributeArgument(
+            attribute.Constructor.Parameters[1].ParameterType, sign));
+        attribute.ConstructorArguments.Add(new CustomAttributeArgument(
+            attribute.Constructor.Parameters[2].ParameterType, unchecked((uint)bits[2])));
+        attribute.ConstructorArguments.Add(new CustomAttributeArgument(
+            attribute.Constructor.Parameters[3].ParameterType, unchecked((uint)bits[1])));
+        attribute.ConstructorArguments.Add(new CustomAttributeArgument(
+            attribute.Constructor.Parameters[4].ParameterType, unchecked((uint)bits[0])));
+        provider.CustomAttributes.Add(attribute);
     }
 
     /// Resolve the base constructor a derived class's ctor chains to — for an

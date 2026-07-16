@@ -121,7 +121,7 @@ public static partial class DiagnosticDescriptors
         "This is a compiler bug — the input may still be valid E#.",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9500"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9500"));
 
     /// The emitter produced a type that declares an interface but does not supply a
     /// loadable implementation for one of its members — the CLR throws
@@ -135,7 +135,7 @@ public static partial class DiagnosticDescriptors
         "(For a value type, the implementing method must be virtual + final.)",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9510"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9510"));
 
     /// The emitter formed a generic instantiation whose type argument does not
     /// satisfy the parameter's constraint — the JIT rejects it with a
@@ -148,7 +148,7 @@ public static partial class DiagnosticDescriptors
         "constraint '{2}'. The runtime would reject it with VerificationException. ",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9511"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9511"));
 
     /// A concrete (non-abstract, non-extern) method was emitted with no method body.
     /// The CLR rejects the type at load — there is nothing to JIT.
@@ -159,7 +159,7 @@ public static partial class DiagnosticDescriptors
         "The runtime would reject the type at load (nothing to execute).",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9512"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9512"));
 
     /// An abstract method was emitted on a type that is neither abstract nor an
     /// interface — the CLR cannot instantiate it and rejects it at load.
@@ -170,7 +170,7 @@ public static partial class DiagnosticDescriptors
         "The runtime would reject it at load — an instantiable type must implement all its members.",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9513"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9513"));
 
     /// A MethodImpl override points at a slot that is not on any interface the type
     /// declares nor any base — the override token does not resolve at load.
@@ -181,7 +181,7 @@ public static partial class DiagnosticDescriptors
         "implements and no base type — the runtime cannot bind the override at load.",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9514"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9514"));
 
     /// A value type contains an instance field of its own type by value — an
     /// infinitely-sized layout the CLR rejects at load (the binder's ES2002 normally
@@ -193,7 +193,7 @@ public static partial class DiagnosticDescriptors
         "an infinitely-sized layout the runtime rejects at load. Break the cycle with a pointer.",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9515"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9515"));
 
     /// Two members with the same name and identical signature were emitted on one
     /// type — a duplicate definition the metadata writer or the runtime rejects.
@@ -204,7 +204,7 @@ public static partial class DiagnosticDescriptors
         "a duplicate definition the runtime rejects at load.",
         DiagnosticSeverity.Error,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9516"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9516"));
 
     /// A method signature, field, or local resolved to System.Object where the binder
     /// intended a concrete type — the emitter silently erased a type it could not
@@ -218,5 +218,5 @@ public static partial class DiagnosticDescriptors
         "missing box/cast). Reference the declaring assembly or check the name.",
         DiagnosticSeverity.Warning,
         "Internal",
-        "https://docs.esharp.dev/diagnostics/ES9517"));
+        "https://esharp-lang.vercel.app/diagnostics/ES9517"));
 }

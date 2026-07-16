@@ -63,7 +63,7 @@ sealed class TypeParser : ParserUnit
             NextToken(); // chan
             Match(SyntaxTokenKind.Less, "Expected '<' after 'chan'.");
             var elem = ParseType(new HashSet<SyntaxTokenKind> { SyntaxTokenKind.Greater });
-            Match(SyntaxTokenKind.Greater, "Expected '>' after chan element type.");
+            Cursor.ConsumeTypeGreater("Expected '>' after chan element type.");
             return MaybeNullable(new GenericTypeSyntax("chan", [elem]), terminators, start);
         }
 
@@ -99,14 +99,17 @@ sealed class TypeParser : ParserUnit
         Match(SyntaxTokenKind.Less);
         var args = new List<TypeSyntax>();
         var argTerminators = new HashSet<SyntaxTokenKind> { SyntaxTokenKind.Comma, SyntaxTokenKind.Greater };
-        while (Current.Kind is not (SyntaxTokenKind.Greater or SyntaxTokenKind.EndOfFile))
+        while (!IsTypeGreater(Current.Kind) && Current.Kind != SyntaxTokenKind.EndOfFile)
         {
             args.Add(ParseType(argTerminators));
             if (Current.Kind == SyntaxTokenKind.Comma) NextToken();
         }
-        Match(SyntaxTokenKind.Greater, "Expected '>' to close type argument list.");
+        Cursor.ConsumeTypeGreater("Expected '>' to close type argument list.");
         return args;
     }
+
+    static bool IsTypeGreater(SyntaxTokenKind kind) => kind is SyntaxTokenKind.Greater
+        or SyntaxTokenKind.ShiftRight or SyntaxTokenKind.UnsignedShiftRight;
 
     TypeSyntax ParseFunctionPointerType(HashSet<SyntaxTokenKind> terminators, SourceSpan start)
     {
@@ -161,6 +164,10 @@ sealed class TypeParser : ParserUnit
                     depth--; break;
                 case SyntaxTokenKind.Greater:
                     if (depth > 0) depth--; break;
+                case SyntaxTokenKind.ShiftRight:
+                    depth = Math.Max(0, depth - 2); break;
+                case SyntaxTokenKind.UnsignedShiftRight:
+                    depth = Math.Max(0, depth - 3); break;
                 case SyntaxTokenKind.Arrow:
                     if (depth == 0) return true; break;
             }
@@ -171,14 +178,26 @@ sealed class TypeParser : ParserUnit
     {
         Match(SyntaxTokenKind.OpenParen);
         var elements = new List<TypeSyntax>();
+        var elementNames = new List<string?>();
         var elementTerminators = new HashSet<SyntaxTokenKind> { SyntaxTokenKind.Comma, SyntaxTokenKind.CloseParen };
         while (Current.Kind is not (SyntaxTokenKind.CloseParen or SyntaxTokenKind.EndOfFile))
         {
+            // Optional per-element label: `(name: T, other: U)`. A bare `identifier :`
+            // pair before the element type names it; an unlabeled element keeps a null.
+            string? label = null;
+            if (Current.Kind == SyntaxTokenKind.Identifier && Peek(1).Kind == SyntaxTokenKind.Colon)
+            {
+                label = Current.Text;
+                NextToken();  // identifier
+                NextToken();  // colon
+            }
+            elementNames.Add(label);
             elements.Add(ParseType(elementTerminators));
             if (Current.Kind == SyntaxTokenKind.Comma) NextToken();
         }
         Match(SyntaxTokenKind.CloseParen, "Expected ')' to close tuple type.");
-        return MaybeNullable(new TupleTypeSyntax(elements), terminators, start);
+        var names = elementNames.Any(n => n is not null) ? elementNames : null;
+        return MaybeNullable(new TupleTypeSyntax(elements, names), terminators, start);
     }
 
     // A trailing `?` makes the just-parsed type nullable, unless `?` is a terminator

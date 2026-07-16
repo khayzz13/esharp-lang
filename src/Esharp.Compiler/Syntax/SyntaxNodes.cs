@@ -41,9 +41,11 @@ public sealed record FieldSyntax(string Name, TypeSyntax Type, bool? IsPublic = 
 
 // Property accessor set on a member. A member is a property iff this is non-null.
 // `let` and `var` select this representation even without `{}`; `ComputedGetter`
-// carries the `let x: T => expr` form, while stored forms use generated backing
-// storage. A default expression initializes that storage rather than changing the
-// declaration back into a field.
+// carries both the `let x: T => expr` form and an authored `get => expr` accessor.
+// `HasCustomGetter` distinguishes the accessor-block spelling so lowering can pair
+// it with an authored setter instead of treating it as the shorthand computed form.
+// Stored forms use generated backing storage. A default expression initializes that
+// storage rather than changing the declaration back into a field.
 public sealed record PropertyAccessorsSyntax(
     bool HasGet,
     bool HasSet,
@@ -53,7 +55,12 @@ public sealed record PropertyAccessorsSyntax(
     ExpressionSyntax? SetterBody = null,
     string? LocaStorageName = null,
     string? MutStorageName = null,
-    BlockStatementSyntax? ScopedMutBody = null) : SyntaxNode;
+    BlockStatementSyntax? ScopedMutBody = null,
+    bool HasCustomGetter = false,
+    // Per-accessor visibility overrides (`pub var X { priv set }`). Null means the
+    // accessor inherits the property's own visibility; a set value narrows it.
+    Visibility? GetterVisibility = null,
+    Visibility? SetterVisibility = null) : SyntaxNode;
 
 // `name: Type [= default]` — the default must be a constant shape (ES2180) and is
 // materialized at every call site that omits the argument.
@@ -161,6 +168,10 @@ public sealed record DataDeclarationSyntax(
 {
     /// Declared visibility; `IsPublic` is the legacy boolean face (== Public).
     public Visibility Visibility { get; init; } = IsPublic ? Visibility.Public : Visibility.Internal;
+    public IReadOnlyList<CompilerDirectiveSyntax> CompilerDirectives { get; init; } = [];
+    /// Per-type-parameter bounds, aligned with <see cref="TypeParameters"/>; a null
+    /// entry is unbounded, `"unmanaged"` is the CLR unmanaged constraint (P3).
+    public IReadOnlyList<string?>? GenericConstraints { get; init; }
 }
 
 // static Foo { let X = ..., var Y = ..., returns T, func bar() ... }
@@ -185,13 +196,15 @@ public sealed record InterfaceMethodSyntax(string Name, IReadOnlyList<ParameterS
 // `let`/`var` keyword — fix the minimum set: `{ get }` requires a getter, `{ get set }`
 // a getter and a settable setter, `{ get init }` a getter and an init-only setter (one
 // carrying `modreq(IsExternalInit)`), and `loca` requires durable property identity.
-// An implementer may offer more (a `var x { }`
-// satisfies a `let x { get }`); a plain field satisfies it through synthesized accessors.
+// An implementer may offer more (a `var x { }` satisfies a `let x { get }`). A plain
+// field never satisfies a property requirement: the implementing source must declare
+// `let` or `var` so it explicitly owns the property ABI.
 public sealed record InterfacePropertySyntax(
     string Name, TypeSyntax Type, bool HasGet, bool HasSet, bool HasInit, bool HasLoca = false) : SyntaxNode;
 public sealed record InterfaceDeclarationSyntax(bool IsPublic, string Name, IReadOnlyList<string> TypeParameters, IReadOnlyList<InterfaceMethodSyntax> Methods, IReadOnlyList<FieldSyntax>? Events = null, IReadOnlyList<InterfacePropertySyntax>? Properties = null) : MemberSyntax
 {
     public Visibility Visibility { get; init; } = IsPublic ? Visibility.Public : Visibility.Internal;
+    public IReadOnlyList<CompilerDirectiveSyntax> CompilerDirectives { get; init; } = [];
 }
 
 // const NAME[: Type] = literalExpr  — compile-time constant, no storage.
@@ -201,6 +214,13 @@ public sealed record ConstDeclarationSyntax(bool IsPublic, string Name, TypeSynt
 
 // #derive equality, debug
 public sealed record DeriveDirectiveSyntax(IReadOnlyList<string> Traits) : SyntaxNode;
+
+// Compiler directives are deliberately distinct from CLR attributes. They affect
+// compilation only and are never copied into emitted metadata.
+public sealed record CompilerDirectiveArgumentSyntax(string Name, bool Value) : SyntaxNode;
+public sealed record CompilerDirectiveSyntax(
+    string Name,
+    IReadOnlyList<CompilerDirectiveArgumentSyntax> Arguments) : SyntaxNode;
 
 public sealed record ChoiceDeclarationSyntax(bool IsRef, bool IsPublic, string Name, IReadOnlyList<string> TypeParameters, IReadOnlyList<ChoiceCaseSyntax> Cases) : MemberSyntax
 {
@@ -230,7 +250,17 @@ public sealed record FunctionDeclarationSyntax(
     // The parser hoists it to namespace scope with a synthesized `self` first parameter;
     // this flag keeps it a method (attached, byref `self`, no value-snapshot) under the
     // explicit-attachment model, distinct from a bare free function with a data first param.
-    bool IsTypeBodyMethod = false) : MemberSyntax;
+    bool IsTypeBodyMethod = false) : MemberSyntax
+{
+    public IReadOnlyList<CompilerDirectiveSyntax> CompilerDirectives { get; init; } = [];
+    /// When non-null this is a symbolic operator function (`func +(...)`) rather
+    /// than an identifier-named function.  `Name` retains the source glyph for
+    /// diagnostics and canonical printing; binding/emission dispatch on the kind.
+    public SyntaxTokenKind? OperatorKind { get; init; }
+    /// Per-type-parameter bounds, aligned with <see cref="TypeParameters"/>; a null
+    /// entry is unbounded, `"unmanaged"` is the CLR unmanaged constraint (P3).
+    public IReadOnlyList<string?>? GenericConstraints { get; init; }
+}
 
 // delegate func Name(params) -> R  — a nominal CLR delegate type: a sealed class
 // deriving from System.MulticastDelegate, defined by its Invoke signature.
@@ -301,6 +331,13 @@ public sealed record LiteralExpressionSyntax(object? Value, string Text) : Expre
     public bool SuppressInterpolation { get; init; }
 }
 
+/// <summary>
+/// Raw numeric token retained until binding. This allows <c>19.99</c> to be
+/// parsed directly as decimal when its context is decimal, rather than first
+/// rounding it to double in the parser.
+/// </summary>
+public sealed record NumericLiteralValue(string Text);
+
 public sealed record NameExpressionSyntax(string Name) : ExpressionSyntax;
 
 public sealed record UnaryExpressionSyntax(SyntaxTokenKind OperatorKind, ExpressionSyntax Operand) : ExpressionSyntax;
@@ -347,6 +384,11 @@ public sealed record ListLiteralExpressionSyntax(IReadOnlyList<ExpressionSyntax>
 
 // T[](n) — fixed-size array creation (newarr). Element type + size expression.
 public sealed record ArrayCreationExpressionSyntax(TypeSyntax ElementType, ExpressionSyntax Size) : ExpressionSyntax;
+
+// `stackalloc T[](n)` — a frame-local buffer yielding a `Span<T>` (or `ReadOnlySpan<T>`
+// by target typing). Reuses the `T[](n)` construction form; `stackalloc` flips the
+// allocation to the stack (`localloc`) and the result to a span. Never a `*T`.
+public sealed record StackAllocExpressionSyntax(TypeSyntax ElementType, ExpressionSyntax Size) : ExpressionSyntax;
 
 // (e1, e2, ...)
 public sealed record TupleExpressionSyntax(IReadOnlyList<ExpressionSyntax> Elements) : ExpressionSyntax;
@@ -398,7 +440,7 @@ public sealed record IfExpressionBranchSyntax(ExpressionSyntax Condition, BlockS
 // enum Direction { north, south, east, west }
 // enum Priority { low = 1, medium = 5, high = 10 }
 public sealed record EnumCaseSyntax(string Name, int? ExplicitValue) : SyntaxNode;
-public sealed record EnumDeclarationSyntax(bool IsPublic, string Name, IReadOnlyList<EnumCaseSyntax> Cases) : MemberSyntax
+public sealed record EnumDeclarationSyntax(bool IsPublic, string Name, IReadOnlyList<EnumCaseSyntax> Cases, TypeSyntax? UnderlyingType = null) : MemberSyntax
 {
     public Visibility Visibility { get; init; } = IsPublic ? Visibility.Public : Visibility.Internal;
 }

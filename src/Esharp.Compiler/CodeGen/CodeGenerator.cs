@@ -6,6 +6,7 @@ using Esharp.Diagnostics;
 // BoundProgram + CompilationData (the lowered-program I/O the backend reads) live in
 // the bind+flow+lower assembly; CodeGen is its downstream reader.
 using Esharp.Binder;
+using Esharp.Compilation;
 
 namespace Esharp.CodeGen;
 
@@ -67,7 +68,8 @@ public static partial class CodeGenerator
         string? internalsVisibleTo = null,
         Esharp.Symbols.SymbolTable? externalSymbols = null,
         ILOutputKind outputKind = ILOutputKind.Library,
-        bool implicitUsings = true)
+        bool implicitUsings = true,
+        OptimizationLevel optimization = OptimizationLevel.Debug)
     {
         // ---- THE ASSERTION. Every FEATURE node class that LoweringPipeline must eliminate. ----
         AssertCoreOnly(program.Units);
@@ -80,7 +82,8 @@ public static partial class CodeGenerator
             internalsVisibleTo,
             externalSymbols,
             outputKind,
-            implicitUsings);
+            implicitUsings,
+            optimization);
     }
 
     /// <summary>
@@ -115,7 +118,8 @@ public static partial class CodeGenerator
         string? internalsVisibleTo,
         Esharp.Symbols.SymbolTable? externalSymbols = null,
         ILOutputKind outputKind = ILOutputKind.Library,
-        bool implicitUsings = true)
+        bool implicitUsings = true,
+        OptimizationLevel optimization = OptimizationLevel.Debug)
     {
         ILHeapPointer.ResetCache();
         var diagnostics = new DiagnosticBag();
@@ -166,12 +170,23 @@ public static partial class CodeGenerator
             .Select(g => g.Key)
             .ToHashSet(StringComparer.Ordinal);
         string EmitKey(string name, string nsName) => collidingNames.Contains(name) ? $"{nsName}.{name}" : name;
+        // Install the facade reflection importer so every BCL type is scoped to the
+        // reference assembly a C# consumer compiles against (System.Runtime, ...), rather
+        // than the runtime implementation corelib (System.Private.CoreLib) reflection
+        // resolves to. Import-time scoping means every reference is born consumable — no
+        // post-emit metadata rewrite — so the emitted assembly is a first-class C#
+        // reference (CS0012 otherwise). See FacadeReflectionImporter.
         var assembly = AssemblyDefinition.CreateAssembly(
             new AssemblyNameDefinition(assemblyName, new Version(1, 0)),
             assemblyName,
-            outputKind == ILOutputKind.Console ? ModuleKind.Console : ModuleKind.Dll);
+            new ModuleParameters
+            {
+                Kind = outputKind == ILOutputKind.Console ? ModuleKind.Console : ModuleKind.Dll,
+                ReflectionImporterProvider = new FacadeReflectionImporterProvider(referencePaths),
+            });
 
         var module = assembly.MainModule;
+        EmitDebuggableAttribute(assembly, module, optimization);
         var imports = units.SelectMany(u => u.Imports).Distinct().ToList();
         var types = new ILTypeResolver(module, diagnostics, imports, referencePaths, externalSymbols, implicitUsings);
         types.SetCollidingTypeNames(collidingNames);
@@ -400,12 +415,18 @@ public static partial class CodeGenerator
             foreach (var k in namespaceConsts)
             {
                 var fieldType = types.Resolve(k.Type);
+                var decimalValue = (k.Value as BoundLiteralExpression)?.Value as decimal?;
                 var attrs = (k.IsPublic ? FieldAttributes.Public : FieldAttributes.Assembly)
-                    | FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.HasDefault;
+                    | FieldAttributes.Static
+                    | (decimalValue is not null
+                        ? FieldAttributes.InitOnly
+                        : FieldAttributes.Literal | FieldAttributes.HasDefault);
                 var fdef = new FieldDefinition(k.Name, attrs, fieldType)
                 {
-                    Constant = (k.Value as BoundLiteralExpression)?.Value,
+                    Constant = decimalValue is null ? (k.Value as BoundLiteralExpression)?.Value : null,
                 };
+                if (decimalValue is { } value)
+                    AddDecimalConstantAttribute(fdef, value);
                 HostClassFor(NsOf(k)).Fields.Add(fdef);
             }
 
@@ -585,6 +606,7 @@ public static partial class CodeGenerator
                 {
                     foreach (var tp in func.TypeParameters)
                         method.GenericParameters.Add(new GenericParameter(tp, method));
+                    ApplyGenericConstraints(method.GenericParameters, func.GenericConstraints, module);
                     types.PushGenericContext(method.GenericParameters);
                 }
 
@@ -631,7 +653,7 @@ public static partial class CodeGenerator
             // contributes static members to the former. Standalone static funcs
             // still emit their own abstract/sealed host class.
             var companion = allMembers.OfType<BoundDataDeclaration>().FirstOrDefault(d =>
-                d.Name == sfn.Name && d.TypeParameters.Count == 0 && NsOf(d) == NsOf(sfn));
+                d.Name == sfn.Name && d.TypeParameters.Count == sfn.TypeParameters.Count && NsOf(d) == NsOf(sfn));
             TypeDefinition sfType;
             if (companion is not null)
             {
@@ -645,8 +667,13 @@ public static partial class CodeGenerator
                 var sfAttrs = (sfn.IsPublic ? TypeAttributes.Public : TypeAttributes.NotPublic)
                     | TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.BeforeFieldInit;
                 sfType = new TypeDefinition(NsOf(sfn), sfn.Name, sfAttrs, module.ImportReference(typeof(object)));
+                foreach (var tp in sfn.TypeParameters)
+                    sfType.GenericParameters.Add(new GenericParameter(tp, sfType));
                 module.Types.Add(sfType);
             }
+
+            if (sfType.GenericParameters.Count > 0)
+                types.PushGenericContext(sfType.GenericParameters);
 
             // Emit fields. Const for `let X = <constant>`, plain static for `var X`,
             // static readonly for `let X` initialized by a non-foldable expression
@@ -672,41 +699,26 @@ public static partial class CodeGenerator
                 }
                 sfType.Fields.Add(fdef);
             }
-            if (nonConstInits.Count > 0)
-            {
-                var cctor = new MethodDefinition(
-                    ".cctor",
-                    MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig
-                        | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName,
-                    module.ImportReference(typeof(void)));
-                cctor.Body.InitLocals = true;
-                // Emit each initializer through the full expression emitter so a
-                // `static readonly` field can be any runtime value — an external
-                // construction (`Dictionary<…>(0)`), a call, etc. — not just a literal.
-                var cctorEmitter = new MethodBodyEmitter(cctor, types, diagnostics, new Dictionary<string, FieldDefinition>(StringComparer.Ordinal));
-                var cil = new ILBuilder(cctor);
-                foreach (var (fdef, init) in nonConstInits)
-                {
-                    cctorEmitter.EmitFieldInitializer(fdef, init);
-                }
-                cil.Return();
-                sfType.Methods.Add(cctor);
-            }
 
             // Emit method signatures so call resolution can find them in Pass 1c+.
             foreach (var fn in sfn.Functions)
             {
                 var methodAttrs = (fn.IsPublic ? MethodAttributes.Public : MethodAttributes.Assembly)
-                    | MethodAttributes.Static;
+                    | MethodAttributes.Static | MethodAttributes.HideBySig;
+                if (fn.OperatorKind is not null) methodAttrs |= MethodAttributes.SpecialName;
                 // Return type is resolved AFTER generic parameters land on the method,
                 // so a `T` return/param binds to the method's own GenericParameter
                 // rather than erasing to `object` (mirrors the module-class path).
-                var method = new MethodDefinition(fn.Name, methodAttrs, module.TypeSystem.Void);
+                var methodName = fn.OperatorKind is { } operatorKind
+                    ? Esharp.OperatorFacts.MetadataName(operatorKind, fn.Parameters.Count) ?? fn.Name
+                    : fn.Name;
+                var method = new MethodDefinition(methodName, methodAttrs, module.TypeSystem.Void);
                 bool hasGenerics = fn.TypeParameters.Count > 0;
                 if (hasGenerics)
                 {
                     foreach (var tp in fn.TypeParameters)
                         method.GenericParameters.Add(new GenericParameter(tp, method));
+                    ApplyGenericConstraints(method.GenericParameters, fn.GenericConstraints, module);
                     types.PushGenericContext(method.GenericParameters);
                 }
                 method.ReturnType = types.Resolve(fn.ReturnType);
@@ -728,6 +740,33 @@ public static partial class CodeGenerator
                 staticFuncBodies.Add((fn, method, sfType));
                 if (fn.Symbol is { } sfSym) types.RegisterMethod(sfSym, method);
             }
+
+            // The static `.cctor` is emitted AFTER the facet's method definitions land on
+            // the type, so a field initializer that calls a sibling facet function
+            // (`let Table = buildTable()`) resolves that call to a real MethodDefinition.
+            // Emitted before the methods, its FindMethod index would miss them.
+            if (nonConstInits.Count > 0)
+            {
+                var cctor = new MethodDefinition(
+                    ".cctor",
+                    MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig
+                        | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName,
+                    module.ImportReference(typeof(void)));
+                cctor.Body.InitLocals = true;
+                // Emit each initializer through the full expression emitter so a
+                // `static readonly` field can be any runtime value — an external
+                // construction (`Dictionary<…>(0)`), a call, etc. — not just a literal.
+                var cctorEmitter = new MethodBodyEmitter(cctor, types, diagnostics, new Dictionary<string, FieldDefinition>(StringComparer.Ordinal));
+                var cil = new ILBuilder(cctor);
+                foreach (var (fdef, init) in nonConstInits)
+                {
+                    cctorEmitter.EmitFieldInitializer(fdef, init);
+                }
+                cil.Return();
+                sfType.Methods.Add(cctor);
+            }
+            if (sfType.GenericParameters.Count > 0)
+                types.PopGenericContext();
         }
 
         // Receiver-attached static methods are declared outside the facet body,
@@ -737,13 +776,15 @@ public static partial class CodeGenerator
         foreach (var fn in staticFacetFunctions)
         {
             var receiver = fn.Parameters.FirstOrDefault();
-            var ownerName = receiver.Type switch
+            var ownerInfo = receiver.Type switch
             {
-                StaticFuncType sf => sf.Name,
-                _ => null,
+                StaticFuncType sf => (Name: sf.Name, Arity: sf.TypeParameters?.Count ?? sf.TypeArgs.Count),
+                _ => ((string Name, int Arity)?)null,
             };
-            if (ownerName is null) continue;
-            var owner = module.Types.FirstOrDefault(t => t.Namespace == NsOf(fn) && t.Name == ownerName);
+            if (ownerInfo is null) continue;
+            var ownerName = ownerInfo.Value.Name;
+            var metadataOwnerName = MetadataTypeName(ownerName, ownerInfo.Value.Arity);
+            var owner = module.Types.FirstOrDefault(t => t.Namespace == NsOf(fn) && t.Name == metadataOwnerName);
             if (owner is null)
             {
                 diagnostics.Report("", 0, 0,
@@ -753,11 +794,19 @@ public static partial class CodeGenerator
             types.SetUnitImports(ImportsFor(fn));
             var attrs = (fn.IsPublic ? MethodAttributes.Public : MethodAttributes.Assembly)
                 | MethodAttributes.Static | MethodAttributes.HideBySig;
-            var method = new MethodDefinition(fn.Name, attrs, module.TypeSystem.Void);
+            if (fn.OperatorKind is not null) attrs |= MethodAttributes.SpecialName;
+            var operatorArity = fn.Parameters.Count - 1;
+            var methodName = fn.OperatorKind is { } operatorKind
+                ? Esharp.OperatorFacts.MetadataName(operatorKind, operatorArity) ?? fn.Name
+                : fn.Name;
+            var method = new MethodDefinition(methodName, attrs, module.TypeSystem.Void);
+            if (owner.GenericParameters.Count > 0)
+                types.PushGenericContext(owner.GenericParameters);
             if (fn.TypeParameters.Count > 0)
             {
                 foreach (var tp in fn.TypeParameters)
                     method.GenericParameters.Add(new GenericParameter(tp, method));
+                ApplyGenericConstraints(method.GenericParameters, fn.GenericConstraints, module);
                 types.PushGenericContext(method.GenericParameters);
             }
             method.ReturnType = types.Resolve(fn.ReturnType);
@@ -772,6 +821,7 @@ public static partial class CodeGenerator
                 method.Parameters.Add(def);
             }
             if (fn.TypeParameters.Count > 0) types.PopGenericContext();
+            if (owner.GenericParameters.Count > 0) types.PopGenericContext();
             method.Body.InitLocals = true;
             owner.Methods.Add(method);
             staticFuncBodies.Add((fn, method, owner));
@@ -788,10 +838,9 @@ public static partial class CodeGenerator
         foreach (var member in allMembers)
         {
             // Enter for any type with instance methods OR stored/computed properties OR a
-            // declared interface — the properties need EmitPropertyDefinitions (synthesized
-            // get_/set_ accessors), and a type that satisfies an interface purely through
-            // plain fields (field-satisfies-property) needs the interface-slot wiring here
-            // even when it declares no user methods or `{ }` properties.
+            // declared interface — properties need EmitPropertyDefinitions (synthesized
+            // get_/set_ accessors and interface-slot wiring), even when the type declares
+            // no ordinary user methods.
             if (member is BoundDataDeclaration data && (data.InstanceMethods.Count > 0 || data.Fields.Any(f => f.IsProperty) || ConformanceEntries(data).Count > 0))
             {
                 var typeDef = types.Resolve(new DataType(data.Name, data.TypeParameters,
@@ -1023,6 +1072,10 @@ public static partial class CodeGenerator
                     {
                         foreach (var tp in methodTypeParams)
                             method.GenericParameters.Add(new GenericParameter(tp, method));
+                        // Constraints align with the method's own params — apply only when
+                        // none were filtered out to the declaring type (the common case).
+                        if (methodTypeParams.Count == im.TypeParameters.Count)
+                            ApplyGenericConstraints(method.GenericParameters, im.GenericConstraints, module);
                         types.PushGenericContext(method.GenericParameters);
                         pushedMethodGenericContext = true;
                     }
@@ -1148,7 +1201,7 @@ public static partial class CodeGenerator
                 throw new FeatureNodeInCodeGenException(
                     $"HasAwait==true on instance method '{im.Name}' of '{typeDef.FullName}' reached CodeGen. " +
                     "AsyncLowering must have failed to convert this function body to a state machine.");
-            EmitFunctionBody(module, types, diagnostics, method, im, structFieldMaps, isSelfMethod: true, documentCache: documentCache);
+            EmitFunctionBody(module, types, diagnostics, method, im, structFieldMaps, isSelfMethod: true, documentCache: documentCache, optimization: optimization);
             if (pushedMethodCtx) types.PopGenericContext();
             if (pushedCtx) types.PopGenericContext();
         }
@@ -1164,7 +1217,7 @@ public static partial class CodeGenerator
                 throw new FeatureNodeInCodeGenException(
                     $"HasAwait==true on static-func '{sfFunc.Name}' in '{sfDeclType.FullName}' reached CodeGen. " +
                     "AsyncLowering must have failed.");
-            EmitFunctionBody(module, types, diagnostics, sfMethod, sfFunc, structFieldMaps, documentCache: documentCache);
+            EmitFunctionBody(module, types, diagnostics, sfMethod, sfFunc, structFieldMaps, documentCache: documentCache, optimization: optimization);
             if (pushedMethodCtx) types.PopGenericContext();
         }
         if (staticFunctions.Count > 0)
@@ -1176,7 +1229,7 @@ public static partial class CodeGenerator
                     throw new FeatureNodeInCodeGenException(
                         $"HasAwait==true on free function '{func.Name}' reached CodeGen. " +
                         "AsyncLowering must have failed.");
-                EmitFunctionBody(module, types, diagnostics, method, func, structFieldMaps, documentCache: documentCache);
+                EmitFunctionBody(module, types, diagnostics, method, func, structFieldMaps, documentCache: documentCache, optimization: optimization);
             }
         }
 
@@ -1308,9 +1361,22 @@ public static partial class CodeGenerator
             }
             else
             {
-                var emitter = new MethodBodyEmitter(method, types, diagnostics);
-                emitter.EmitFieldInitializer(backing!, state.SetterBody!);
-                new ILBuilder(method).Return();
+                if (state.Field.IsComputedProperty)
+                {
+                    var parameter = new BoundParameter(state.SetterParam ?? "value", state.Field.Type,
+                        ByRef: false, ReadOnlyByRef: false, IsOut: false, DefaultValue: null);
+                    var body = new BoundFunctionDeclaration(false, method.Name, [], [parameter],
+                        new PrimitiveType("void"),
+                        new BoundBlockStatement([new BoundExpressionStatement(state.SetterBody!)]), []);
+                    EmitFunctionBody(module, types, diagnostics, method, body, structFieldMaps,
+                        documentCache: documentCache);
+                }
+                else
+                {
+                    var emitter = new MethodBodyEmitter(method, types, diagnostics);
+                    emitter.EmitFieldInitializer(backing!, state.SetterBody!);
+                    new ILBuilder(method).Return();
+                }
             }
         }
 
@@ -1318,6 +1384,7 @@ public static partial class CodeGenerator
         // first, followed by the explicit namespace init body.
         var initializedNamespaces = namespaceStates.Where(s => s.Field.DefaultValue is not null).Select(NsOf)
             .Concat(namespaceInitializers.Select(NsOf))
+            .Concat(namespaceConsts.Where(k => (k.Value as BoundLiteralExpression)?.Value is decimal).Select(NsOf))
             .Distinct(StringComparer.Ordinal);
         foreach (var namespaceName in initializedNamespaces)
         {
@@ -1343,6 +1410,12 @@ public static partial class CodeGenerator
             {
                 statements.Add(new BoundAssignment(
                     new BoundNameExpression(state.Field.Name, state.Field.Type), state.Field.DefaultValue!));
+            }
+            foreach (var constant in namespaceConsts.Where(k => NsOf(k) == namespaceName
+                         && (k.Value as BoundLiteralExpression)?.Value is decimal))
+            {
+                statements.Add(new BoundAssignment(
+                    new BoundNameExpression(constant.Name, constant.Type), constant.Value));
             }
             var init = namespaceInitializers.SingleOrDefault(i => NsOf(i) == namespaceName);
             if (init is not null) statements.AddRange(init.Body.Statements);
@@ -1399,6 +1472,26 @@ public static partial class CodeGenerator
         MetadataVerifier.Verify(module, diagnostics);
 
         return (assembly, diagnostics.Diagnostics);
+    }
+
+    static void EmitDebuggableAttribute(AssemblyDefinition assembly, ModuleDefinition module,
+        OptimizationLevel optimization)
+    {
+        // Keep Debug on the compiler's established runtime policy. In particular, even
+        // DebuggingModes.Default changes JIT tracking behaviour and can perturb timing-
+        // sensitive channel/select code. Portable PDBs provide Debug sequence points;
+        // Release is the only mode that needs an explicit JIT-facing policy here.
+        if (optimization == OptimizationLevel.Debug)
+            return;
+
+        var ctor = typeof(System.Diagnostics.DebuggableAttribute).GetConstructor(
+            [typeof(System.Diagnostics.DebuggableAttribute.DebuggingModes)])!;
+        var attribute = new CustomAttribute(module.ImportReference(ctor));
+        var modes = System.Diagnostics.DebuggableAttribute.DebuggingModes.IgnoreSymbolStoreSequencePoints;
+        attribute.ConstructorArguments.Add(new CustomAttributeArgument(
+            module.ImportReference(typeof(System.Diagnostics.DebuggableAttribute.DebuggingModes)),
+            (int)modes));
+        assembly.CustomAttributes.Add(attribute);
     }
 
     // The CLR accepts exactly these entry signatures: parameterless, or one
@@ -1684,7 +1777,8 @@ public static partial class CodeGenerator
     static void EmitFunctionBody(
         ModuleDefinition module, ILTypeResolver types, DiagnosticBag diagnostics, MethodDefinition method,
         BoundFunctionDeclaration func, Dictionary<string, Dictionary<string, FieldDefinition>> structFieldMaps,
-        bool isSelfMethod = false, Dictionary<string, Mono.Cecil.Cil.Document>? documentCache = null)
+        bool isSelfMethod = false, Dictionary<string, Mono.Cecil.Cil.Document>? documentCache = null,
+        OptimizationLevel optimization = OptimizationLevel.Debug)
     {
         var allFields = new Dictionary<string, FieldDefinition>(StringComparer.Ordinal);
         foreach (var param in func.Parameters)
@@ -1728,7 +1822,8 @@ public static partial class CodeGenerator
             foreach (var field in declaringType.Fields)
                 allFields.TryAdd(field.Name, field);
         }
-        var emitter = new MethodBodyEmitter(method, types, diagnostics, allFields, selfParamName);
+        var emitter = new MethodBodyEmitter(method, types, diagnostics, allFields, selfParamName,
+            contractFma: optimization == OptimizationLevel.Release && func.ContractFma);
         // Generic-method body: push the type-parameter context so resolutions
         // of `T` inside the body land on the method's own GenericParameter.
         bool pushedGenericContext = false;

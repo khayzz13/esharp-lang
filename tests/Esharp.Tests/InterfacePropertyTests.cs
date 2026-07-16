@@ -6,9 +6,9 @@ namespace Esharp.Tests;
 // Interface property requirements (plan 11B, last Phase A item): an `interface` declares
 // `let x: T { get }` / `var x: T { get set }` / `required let x: T { get init }`, emitting
 // abstract get_/set_ accessor slots + a PropertyDefinition. An implementer satisfies the
-// contract with a PROPERTY (get-only / get+set / get+init / computed) or a plain FIELD
-// (synthesized accessors). The accessors are wired into the interface vtable slot so a value
-// dispatched through the interface reference reaches them.
+// contract with an explicitly declared PROPERTY (get-only / get+set / get+init / computed).
+// A field remains a field and is diagnosed rather than acquiring an implicit property ABI.
+// Property accessors are wired into the interface vtable slot so interface dispatch reaches them.
 public sealed class InterfacePropertyTests
 {
     static object? Run(string body, string method, params object?[] args) =>
@@ -56,6 +56,23 @@ func measure(a: IArea) -> int = a.area
 func go() -> int { let r = Rect { w: 4, h: 5 } return measure(r) }
 """, "go"));
 
+    [Fact]
+    public void CustomGetterAndBehavioralSetter_SatisfyGetSetRequirement() => Assert.Equal(42, Run("""
+namespace Test
+interface IDisplay { var display: int { get set } }
+class Session : IDisplay {
+    id: int
+    init(id: int) { self.id = id }
+    func replace(value: int) { self.id = value }
+    pub var display: int {
+        get => self.id + 1
+        set(value) => self.replace(value)
+    }
+}
+func update(value: IDisplay) -> int { value.display = 41  return value.display }
+func go() -> int { return update(Session(0)) }
+""", "go"));
+
     // A get+set property satisfies a get-only requirement (get+set ⊇ get-only).
     [Fact]
     public void Property_GetSet_SatisfiesGetOnlyRequirement() => Assert.Equal(9, Run("""
@@ -69,25 +86,27 @@ func read(r: IReadable) -> int = r.v
 func go() -> int { let c = Cell(9) return read(c) }
 """, "go"));
 
-    // --- Conformance by a plain field (field-satisfies-property) ---
+    // --- A field never becomes a property through conformance ---
 
-    // A plain mutable field satisfies `{ get set }` through synthesized accessors,
-    // dispatched through the interface reference (write then read).
     [Fact]
-    public void Field_Mutable_SatisfiesGetSet() => Assert.Equal(100, Run("""
+    public void MutableField_DoesNotSatisfyGetSetProperty()
+    {
+        var diagnostics = EsHarness.Diagnostics("""
 namespace Test
 interface ICounter { var total: int { get set } }
 class Counter : ICounter {
     pub total: int
     init() { self.total = 0 }
 }
-func bump(c: ICounter) -> int { c.total = 100  return c.total }
-func go() -> int { let c = Counter() return bump(c) }
-""", "go"));
+""");
+        var mismatch = Assert.Single(diagnostics, d => d.Code == "ES2226");
+        Assert.Contains("'Counter.total' is a field", mismatch.Message);
+        Assert.Contains("interface 'ICounter' requires property 'total'", mismatch.Message);
+    }
 
-    // A write-once (`let`) plain field satisfies a get-only requirement.
+    // `let` is a property declaration even without braces.
     [Fact]
-    public void Field_Let_SatisfiesGetOnly() => Assert.Equal(13, Run("""
+    public void Property_Let_SatisfiesGetOnly() => Assert.Equal(13, Run("""
 namespace Test
 interface ITagged { let tag: int { get } }
 class Item : ITagged {
@@ -98,10 +117,9 @@ func read(t: ITagged) -> int = t.tag
 func go() -> int { let i = Item(13) return read(i) }
 """, "go"));
 
-    // A value struct satisfies a property interface through a plain field; passing it
-    // through the interface boxes the value, and the synthesized getter reads it back.
+    // A value struct property survives boxing and dispatches through its accessor.
     [Fact]
-    public void Struct_FieldSatisfiesProperty_BoxesThroughInterface() => Assert.Equal(5, Run("""
+    public void Struct_PropertySatisfiesProperty_BoxesThroughInterface() => Assert.Equal(5, Run("""
 namespace Test
 interface IHasX { let x: int { get } }
 struct Point : IHasX {
@@ -180,12 +198,10 @@ class Box : IBox {
         Assert.All(map.TargetMethods, m => Assert.True(m.IsVirtual));
     }
 
-    // A plain field that satisfies a property contract maps the synthesized accessor into
-    // the interface slot — the field stays a field, the accessor fills the contract.
     [Fact]
-    public void FieldSatisfiesProperty_SynthesizedAccessorFillsSlot()
+    public void Field_DoesNotAcquireSynthesizedInterfaceAccessors()
     {
-        var asm = EsHarness.Compile("""
+        var diagnostics = EsHarness.Diagnostics("""
 namespace Test
 interface INamed { var label: string { get set } }
 class Tag : INamed {
@@ -193,11 +209,19 @@ class Tag : INamed {
     init() { self.label = "" }
 }
 """);
-        var tag = asm.GetType("Test.Tag")!;
-        // The field is still a real field of the declared name.
-        Assert.NotNull(tag.GetField("label", BindingFlags.Public | BindingFlags.Instance));
-        var map = tag.GetInterfaceMap(asm.GetType("Test.INamed")!);
-        Assert.Contains(map.TargetMethods, m => m.Name == "get_label");
-        Assert.Contains(map.TargetMethods, m => m.Name == "set_label");
+        Assert.Single(diagnostics, d => d.Code == "ES2226");
+    }
+
+    [Fact]
+    public void StructField_DoesNotSatisfyGetOnlyProperty()
+    {
+        var diagnostics = EsHarness.Diagnostics("""
+namespace Test
+interface IHasX { let x: int { get } }
+struct Point : IHasX {
+    pub x: int
+}
+""");
+        Assert.Single(diagnostics, d => d.Code == "ES2226");
     }
 }

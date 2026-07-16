@@ -10,7 +10,7 @@
 // BoundTypeTestExpression is NOT replaced — it is kept as the boolean `is`-test
 // primitive that produces bool, not a typed value.
 //
-// Codegen contract: CodeGen.EmitExpression switches on ConversionKind (six cases,
+// Codegen contract: CodeGen.EmitExpression switches exhaustively on ConversionKind,
 // all mechanical IL). No FEATURE node dispatch is needed here — BoundConversion
 // is CORE and survives lowering unchanged.
 //
@@ -25,11 +25,11 @@
 namespace Esharp.BoundTree;
 
 // ---------------------------------------------------------------------------
-// ConversionKind — the six IL-level shapes a conversion can take.
+// ConversionKind — the IL-level shapes a conversion can take.
 // ---------------------------------------------------------------------------
 
 /// Discriminates the IL instruction (or lack thereof) the codegen emits for a
-/// BoundConversion. The six values map 1-to-1 onto the cases a single
+/// BoundConversion. The values map 1-to-1 onto the cases a single
 /// CodeGen.EmitConversion switch handles.
 public enum ConversionKind
 {
@@ -79,6 +79,26 @@ public enum ConversionKind
     /// kind so the EmitConversion switch knows exactly which IL sequence to emit.
     NullableWrap,
 
+    /// Checked explicit conversion between E# primitive numeric types. The emitter
+    /// selects a CLR conv.ovf opcode or System.Decimal conversion operator.
+    NumericChecked,
+
+    /// BCL implicit span conversion realized as a `call op_Implicit`:
+    ///   `T[]`     → `Span<T>` / `ReadOnlySpan<T>`
+    ///   `Span<T>` → `ReadOnlySpan<T>`
+    /// These are the CLR's own implicit operators (not user-defined), the seam that
+    /// lets a `stackalloc` span or a heap array flow into the many `ReadOnlySpan<T>`-
+    /// taking BCL APIs. Codegen emits the operand, then `call`s the op_Implicit closed
+    /// over the target span's element type (invariant, so source element == target).
+    ImplicitSpan,
+
+    /// Explicit integer → enum conversion (`ModelFileCodec(byteValue)`), the inverse of
+    /// the enum → underlying-integer native conversion. An enum has no runtime
+    /// representation distinct from its underlying integral, so codegen emits the operand
+    /// and a `conv` to the enum's underlying width (unchecked, matching a C# `(Enum)i`
+    /// cast); the stack value then IS the enum.
+    IntegerToEnum,
+
     // NOTE: there is deliberately NO NullCheck or NullableUnwrap kind.
     //   • a null TEST is BoundTypeTestExpression (it yields bool, not a typed value);
     //   • a T? → T UNWRAP is a lowering concern (NullFlowLowering emits get_Value /
@@ -119,7 +139,8 @@ public sealed partial record BoundConversion(
     /// flow-proven narrowings.
     public bool IsImplicit =>
         Kind is ConversionKind.Identity or ConversionKind.Box
-             or ConversionKind.Narrow   or ConversionKind.NullableWrap;
+             or ConversionKind.Narrow   or ConversionKind.NullableWrap
+             or ConversionKind.ImplicitSpan;
 
     /// True when the result type can be null (IsInst → T? result).
     public bool ResultIsNullable => Kind == ConversionKind.IsInst;
@@ -170,6 +191,20 @@ public sealed partial record BoundConversion(
     public static BoundConversion WrapNullable(BoundExpression operand, NullableType nullableTargetType)
         => new(operand, nullableTargetType, ConversionKind.NullableWrap);
 
+    public static BoundConversion NumericChecked(BoundExpression operand, BoundType targetType)
+        => new(operand, targetType, ConversionKind.NumericChecked);
+
+    /// BCL implicit span conversion (`T[]`/`Span<T>` → span). `spanTargetType` is the
+    /// `Span<T>` / `ReadOnlySpan<T>` ExternalType; codegen resolves the closed
+    /// `op_Implicit` from the operand's shape and the target's element.
+    public static BoundConversion ImplicitSpan(BoundExpression operand, BoundType spanTargetType)
+        => new(operand, spanTargetType, ConversionKind.ImplicitSpan);
+
+    /// Explicit integer → enum conversion (`ModelFileCodec(byteValue)`). `enumTargetType`
+    /// is the target `EnumType`; codegen conv's the operand to the enum's underlying width.
+    public static BoundConversion IntegerToEnum(BoundExpression operand, EnumType enumTargetType)
+        => new(operand, enumTargetType, ConversionKind.IntegerToEnum);
+
     // -----------------------------------------------------------------------
     // IL opcode hint — a documentation aid for the codegen author; the switch
     // on Kind is still the canonical dispatch, but this gives a human-readable
@@ -188,6 +223,9 @@ public sealed partial record BoundConversion(
         ConversionKind.IsInst       => "isinst",
         ConversionKind.Narrow       => "isinst/unbox.any (proven)",
         ConversionKind.NullableWrap => "newobj Nullable`1::.ctor",
+        ConversionKind.NumericChecked => "conv.ovf.* / System.Decimal conversion",
+        ConversionKind.ImplicitSpan => "call op_Implicit (span)",
+        ConversionKind.IntegerToEnum => "conv.* (integer → enum underlying)",
         _                           => "unknown",
     };
 
@@ -259,6 +297,13 @@ public static class ConversionClassification
         if (IsObjectOrInterface(source) && IsValueType(target))
             return ConversionKind.Unbox;
 
+        // BCL implicit span conversion (`T[]`/`Span<T>` → span). Checked BEFORE the
+        // reference→reference branch: a `Span<T>` is a by-ref-like ExternalType that
+        // IsReference reports true for, so without this it would wrongly classify as a
+        // castclass. It is really the framework's `op_Implicit` — a `call`, not a cast.
+        if (IsImplicitSpanConversion(source, target))
+            return ConversionKind.ImplicitSpan;
+
         // Reference type → narrower reference type (could fail at runtime): castclass.
         // The binder chooses between CastClass (assert) and IsInst (safe) based on
         // E# syntax (`as!` vs `as`); the caller passes the chosen kind.
@@ -266,6 +311,24 @@ public static class ConversionClassification
             return ConversionKind.CastClass; // caller may override to IsInst for `as T`.
 
         return null;
+    }
+
+    /// The CLR's implicit span conversions: an array to a span of its element type,
+    /// or a `Span<T>` to a `ReadOnlySpan<T>` of the same element. Spans are invariant
+    /// in T, so the element must match exactly (`byte[]` → `ReadOnlySpan<byte>`, never
+    /// `→ ReadOnlySpan<object>`). Realized as the framework's `op_Implicit`.
+    public static bool IsImplicitSpanConversion(BoundType source, BoundType target)
+    {
+        if (target is not ExternalType { Name: "Span" or "ReadOnlySpan", TypeArguments: { Count: 1 } targetArgs })
+            return false;
+        var elem = targetArgs[0];
+        // T[] → Span<T> / ReadOnlySpan<T>
+        if (source is ArrayBoundType arr)
+            return arr.ElementType == elem;
+        // Span<T> → ReadOnlySpan<T>
+        return target is ExternalType { Name: "ReadOnlySpan" }
+            && source is ExternalType { Name: "Span", TypeArguments: { Count: 1 } srcArgs }
+            && srcArgs[0] == elem;
     }
 
     /// True when t is a value-type BoundType (struct, enum, primitive, tuple).
@@ -278,7 +341,7 @@ public static class ConversionClassification
                                               or "short" or "ushort"
                                               or "int"   or "uint"
                                               or "long"  or "ulong"
-                                              or "float" or "double"
+                                              or "float" or "double" or "decimal"
                                               or "char"  or "nint"   or "nuint" => true,
         DataType d => d.Classification == DataClassification.Struct,
         EnumType   => true,

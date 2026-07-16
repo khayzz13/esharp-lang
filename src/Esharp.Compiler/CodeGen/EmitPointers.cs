@@ -476,9 +476,15 @@ public partial class MethodBodyEmitter
                 if (type.Name == dc.ResolvedTypeName && type.IsEnum)
                 {
                     var field = type.Fields.FirstOrDefault(f => f.IsStatic && f.IsLiteral && f.Name == dc.CaseName);
-                    if (field?.Constant is int val)
+                    if (field?.Constant is { } constant)
                     {
-                        _il.LoadInt(val);
+                        // The literal is boxed as the enum's underlying integral type
+                        // (byte/short/int/long/…). Load it at the matching width so the
+                        // stack value's size agrees with `value__`.
+                        var underlying = type.Fields.FirstOrDefault(f => f.Name == "value__")?.FieldType;
+                        var is64 = underlying is { } u && (u.MetadataType is Mono.Cecil.MetadataType.Int64 or Mono.Cecil.MetadataType.UInt64);
+                        if (is64) _il.LoadLong(System.Convert.ToInt64(constant));
+                        else _il.LoadInt(unchecked((int)System.Convert.ToInt64(constant)));
                         return;
                     }
                 }

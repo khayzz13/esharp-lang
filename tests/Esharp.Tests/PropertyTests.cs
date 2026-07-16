@@ -189,4 +189,132 @@ class Circle {
         Assert.Null(t.GetField("area", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
         Assert.NotNull(t.GetMethod("get_area", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
     }
+
+    [Fact]
+    public void CustomGetter_LetAccessor_RecomputesWithoutBackingStorage()
+    {
+        var result = EsHarness.Run("""
+namespace Test
+class Session {
+    id: int
+    init(id: int) { self.id = id }
+    let displayId: int {
+        get => self.id + 100
+    }
+}
+func go() -> int { return Session(23).displayId }
+""", "go");
+        Assert.Equal(123, result);
+    }
+
+    [Fact]
+    public void CustomGetter_VarPairsWithBehavioralSetter()
+    {
+        var result = EsHarness.Run("""
+namespace Test
+class Session {
+    id: int
+    init(id: int) { self.id = id }
+    func replaceId(value: int) { self.id = value }
+    var displayId: int {
+        get => self.id + 1
+        set(value) => self.replaceId(value)
+    }
+}
+func go() -> int {
+    let session = Session(4)
+    session.displayId = 41
+    return session.displayId
+}
+""", "go");
+        Assert.Equal(42, result);
+    }
+
+    [Fact]
+    public void CustomGetterAndSetter_EmitPropertyWithoutBackingStorage()
+    {
+        var asm = EsHarness.Compile("""
+namespace Test
+class Session {
+    id: int
+    init(id: int) { self.id = id }
+    func replaceId(value: int) { self.id = value }
+    pub var displayId: int {
+        get => self.id
+        set(value) => self.replaceId(value)
+    }
+}
+""");
+        var type = asm.GetType("Test.Session")!;
+        var property = type.GetProperty("displayId")!;
+        Assert.NotNull(property.GetMethod);
+        Assert.NotNull(property.SetMethod);
+        Assert.Null(type.GetField("<displayId>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance));
+    }
+
+    [Fact]
+    public void VarArrowProperty_IsRejectedInsteadOfSilentlyBecomingReadonly()
+    {
+        var diagnostics = EsHarness.Diagnostics("""
+namespace Test
+class Session {
+    id: int
+    var displayId: int => self.id
+}
+""");
+        Assert.Contains(diagnostics, d => d.Code == "ES2227");
+    }
+
+    [Fact]
+    public void VarCustomGetter_RequiresWriteBehavior()
+    {
+        var diagnostics = EsHarness.Diagnostics("""
+namespace Test
+class Session {
+    id: int
+    var displayId: int {
+        get => self.id
+    }
+}
+""");
+        Assert.Contains(diagnostics, d => d.Code == "ES2228");
+    }
+
+    [Fact]
+    public void OwningTypeMethod_AssignmentInvokesCustomSetter()
+    {
+        var result = EsHarness.Run("""
+namespace Test
+class Clamp {
+    var value: int { set(v) => v < 0 ? 0 : v }
+    init() { self.value = 5 }
+    func replace(v: int) { self.value = v }
+}
+func go() -> int {
+    let clamp = Clamp()
+    clamp.replace(-10)
+    return clamp.value
+}
+""", "go");
+        Assert.Equal(0, result);
+    }
+
+    [Fact]
+    public void GeneratedAsyncIterator_CurrentIsAPropertyNotAFieldFacade()
+    {
+        var asm = EsHarness.Compile("""
+namespace Test
+func numbers() -> IAsyncEnumerable<int> {
+    yield 1
+}
+""");
+        var iterator = Assert.Single(asm.GetTypes(), type =>
+            type.Name.Contains("d__Iterator", StringComparison.Ordinal));
+        var current = iterator.GetProperty("Current",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(current);
+        Assert.NotNull(current!.GetGetMethod(nonPublic: true));
+        Assert.Null(iterator.GetField("Current",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
+    }
 }

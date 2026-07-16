@@ -384,6 +384,37 @@ public sealed class SymbolTable
     public ConstSymbol? TryGetConstant(string name) =>
         _constants.TryGetValue(name, out var c) ? c : null;
 
+    /// Broad existence probe for the masked-resolution ICE guard
+    /// (<see cref="Esharp.Diagnostics.ResolutionIce"/>): is an entity of <paramref name="kind"/>
+    /// named <paramref name="name"/> known ANYWHERE — including the qualified and member
+    /// tables a narrow resolution site does not consult (facet/host-qualified functions
+    /// keyed `Host.name`, promoted functions, type members)? A `true` here at a failed
+    /// resolution site means the site had a scope/context bug, not that the name is undefined.
+    public bool IsNameKnown(Esharp.Diagnostics.ResolvableKind kind, string name) => kind switch
+    {
+        Esharp.Diagnostics.ResolvableKind.Method =>
+            _functions.ContainsKey(name)
+            || _functions.Keys.Any(k => k.EndsWith("." + name, System.StringComparison.Ordinal))
+            || _promotedFunctions.ContainsKey(name)
+            || _types.Values.Any(t => t.Members.Any(m => string.Equals(m.Name, name, System.StringComparison.Ordinal))),
+        Esharp.Diagnostics.ResolvableKind.Type =>
+            FindType(name) is not null || _knownNamespaces.Contains(name),
+        Esharp.Diagnostics.ResolvableKind.Namespace =>
+            _knownNamespaces.Contains(name),
+        Esharp.Diagnostics.ResolvableKind.Constant =>
+            _constants.ContainsKey(name)
+            || _types.Values.Any(t => t.Constants.Any(c => string.Equals(c.Name, name, System.StringComparison.Ordinal))),
+        Esharp.Diagnostics.ResolvableKind.Property or Esharp.Diagnostics.ResolvableKind.Field =>
+            _types.Values.Any(t => t.Fields.Any(f => string.Equals(f.Name, name, System.StringComparison.Ordinal))),
+        Esharp.Diagnostics.ResolvableKind.Member =>
+            IsNameKnown(Esharp.Diagnostics.ResolvableKind.Method, name)
+            || IsNameKnown(Esharp.Diagnostics.ResolvableKind.Field, name),
+        // A local is scope-bound: no global registry can prove one *should* have resolved,
+        // so there is nothing to distinguish a masked bug from a genuine out-of-scope use.
+        Esharp.Diagnostics.ResolvableKind.Local => false,
+        _ => false,
+    };
+
     // ============================================================================
     // [Δ] Incremental invalidation — per-unit remove / replace
     // ============================================================================

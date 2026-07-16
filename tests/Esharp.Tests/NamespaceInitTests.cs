@@ -268,6 +268,22 @@ public sealed class NamespaceInitTests
             """, "run"));
 
     [Fact]
+    public void NamespaceCustomGetterAndBehavioralSetter_RouteThroughAuthoredAccessors()
+        => Assert.Equal(42, EsHarness.Run("""
+            namespace Test
+            var raw: int
+            func replace(value: int) { raw = value }
+            var display: int {
+                get => raw + 1
+                set(value) => replace(value)
+            }
+            func run() -> int {
+                display = 41
+                return display
+            }
+            """, "run"));
+
+    [Fact]
     public void NamespaceStoredLetProperty_IsWritableOnlyFromInit()
         => Assert.Equal("ready", EsHarness.Run("""
             namespace Test

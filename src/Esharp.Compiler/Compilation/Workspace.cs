@@ -146,4 +146,14 @@ public enum OutputKind { Library, Console }
 
 // C#-half compilation settings. Defaults match the modern Microsoft.NET.Sdk
 // template: implicit global usings on, nullable reference types on.
-public sealed record ProjectOptions(bool EnableImplicitUsings = true, bool Nullable = true);
+public enum OptimizationLevel
+{
+    Debug,
+    Release,
+}
+
+public sealed record ProjectOptions(
+    bool EnableImplicitUsings = true,
+    bool Nullable = true,
+    OptimizationLevel Optimization = OptimizationLevel.Debug,
+    bool ShowAllocations = false);

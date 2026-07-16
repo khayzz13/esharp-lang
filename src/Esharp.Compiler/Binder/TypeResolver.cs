@@ -114,6 +114,24 @@ public sealed class TypeResolver
         if (t == typeof(byte)) return new PrimitiveType("byte");
         if (t == typeof(short)) return new PrimitiveType("short");
         if (t == typeof(char)) return new PrimitiveType("char");
+        // The unsigned / wide numeric primitives — a BCL method returning `uint`
+        // (`BinaryPrimitives.ReadUInt32LittleEndian`), `ushort`, `sbyte`, `decimal`, …
+        // must map to the E# primitive so `int(value)` conversions, signedness-aware
+        // operators, and contextual numeric binding all see a numeric primitive rather
+        // than an opaque `UInt32` external type.
+        if (t == typeof(uint)) return new PrimitiveType("uint");
+        if (t == typeof(ulong)) return new PrimitiveType("ulong");
+        if (t == typeof(ushort)) return new PrimitiveType("ushort");
+        if (t == typeof(sbyte)) return new PrimitiveType("sbyte");
+        if (t == typeof(decimal)) return new PrimitiveType("decimal");
+        if (t == typeof(nint)) return new PrimitiveType("nint");
+        if (t == typeof(nuint)) return new PrimitiveType("nuint");
+        // A reflected single-dimension array return (`MemoryStream.ToArray()` →
+        // `byte[]`) is a first-class E# array, not an opaque external type — so it
+        // indexes, iterates, and implicit-converts to a span like any `T[]`. Higher-rank
+        // arrays fall through to the external fallback (E# arrays are single-dimension).
+        if (t.IsArray && t.GetArrayRank() == 1)
+            return new ArrayBoundType(MapRuntimeTypeToBoundType(t.GetElementType()!));
         // A reflected constructed generic maps STRUCTURED — base name + recursive
         // args — never rendered to a `Name<...>` string for someone to re-parse.
         if (t.IsGenericType && !t.IsGenericTypeDefinition)
@@ -132,7 +150,12 @@ public sealed class TypeResolver
     /// Mirrors the non-generic `RuntimeTypeToEsharpName` fallback, which already qualifies.
     internal static string RuntimeGenericBaseName(Type t)
     {
-        var simple = t.Name[..t.Name.IndexOf('`')];
+        // A nested type of a generic (`List<int>.Enumerator`) is itself IsGenericType —
+        // it inherits the enclosing arguments — yet its own name carries no arity
+        // backtick, so IndexOf returns -1. Take the whole name in that case rather than
+        // slicing to a negative length.
+        var tick = t.Name.IndexOf('`');
+        var simple = tick >= 0 ? t.Name[..tick] : t.Name;
         var ns = t.Namespace;
         if (ns is null) return simple;
         return ns is "System" or "System.Collections.Generic"
@@ -285,7 +308,7 @@ public sealed class TypeResolver
             NullableTypeSyntax n => new NullableType(ResolveType(n.Inner)),
             FunctionPointerTypeSyntax f => new FunctionPointerType(
                 f.ParameterTypes.Select(ResolveNestedRef).ToList(), ResolveNestedRef(f.ReturnType)),
-            TupleTypeSyntax t => new TupleType(t.Elements.Select(ResolveNestedRef).ToList()),
+            TupleTypeSyntax t => new TupleType(t.Elements.Select(ResolveNestedRef).ToList()) { ElementNames = t.ElementNames },
             ArrayTypeSyntax a => new ArrayBoundType(ResolveType(a.ElementType)),
             GenericTypeSyntax g => ResolveGeneric(g),
             NamedTypeSyntax n => ResolveNamed(n.Name, ReportSpan(n.Span)),
@@ -390,7 +413,7 @@ public sealed class TypeResolver
     static BoundType CloseGenericBase(BoundType genericBase, IReadOnlyList<BoundType> boundArgs) => genericBase switch
     {
         DataType dt when dt.TypeParameters.Count > 0
-            => new DataType(dt.Name, dt.TypeParameters, dt.Decl, dt.Classification, boundArgs),
+            => dt with { TypeArguments = boundArgs.ToList() },
         ChoiceType ct when ct.TypeParameters.Count > 0 => ct with { TypeArguments = boundArgs.ToList() },
         InterfaceType it when it.Decl.TypeParameters.Count > 0 => it with { TypeArguments = boundArgs.ToList() },
         _ => genericBase,
@@ -452,7 +475,7 @@ public sealed class TypeResolver
         {
             "void" => new VoidType(),
             "int" or "string" or "bool" or "float" or "double" or "byte" or "char" or "long" or "short"
-                or "uint" or "ulong" or "ushort" or "sbyte" or "decimal" => new PrimitiveType(name),
+                or "uint" or "ulong" or "ushort" or "sbyte" or "nint" or "nuint" or "decimal" => new PrimitiveType(name),
             "Guid" or "DateTimeOffset" or "DateTime" or "TimeSpan" => new PrimitiveType(name),
             _ => new ExternalType(name),
         };
@@ -619,6 +642,8 @@ public sealed class TypeResolver
             "uint" => typeof(uint),
             "ulong" => typeof(ulong),
             "ushort" => typeof(ushort),
+            "nint" => typeof(nint),
+            "nuint" => typeof(nuint),
             // The CLR keyword aliases the binder carries as bare `ExternalType` names —
             // `Type.GetType("object")` / `("void")` return null (the types are `Object`
             // / `Void`), so without these a generic arg of `object` (`List<object>`)
@@ -630,16 +655,33 @@ public sealed class TypeResolver
         };
     }
 
+    // The reflection type-name parser THROWS ("The given assembly name was invalid")
+    // rather than returning null when a name contains a character it reads as
+    // assembly-qualified syntax (`,`, `[`, a bad backtick arity). A name reaching type
+    // resolution is arbitrary source — a value name, a mangled tuple/generic — so a
+    // parse failure must mean "not a type here", never a compiler crash.
+    static Type? SafeGetType(string name)
+    {
+        try { return Type.GetType(name); }
+        catch (Exception e) when (e is ArgumentException or System.IO.FileLoadException or System.IO.FileNotFoundException or TypeLoadException or BadImageFormatException) { return null; }
+    }
+
+    static Type? SafeAsmGetType(System.Reflection.Assembly asm, string name)
+    {
+        try { return asm.GetType(name); }
+        catch (Exception e) when (e is ArgumentException or System.IO.FileLoadException or System.IO.FileNotFoundException or TypeLoadException or BadImageFormatException) { return null; }
+    }
+
     internal Type? FindTypeByName(string name)
     {
         // Already-qualified / assembly-qualified name (e.g. "System.Text.Json.JsonElement").
-        if (Type.GetType(name) is { } qualified) return qualified;
+        if (SafeGetType(name) is { } qualified) return qualified;
 
         var assemblies = AppDomain.CurrentDomain.GetAssemblies();
 
         // Tier 1: exact (top-level) name in any loaded assembly.
         foreach (var asm in assemblies)
-            if (asm.GetType(name) is { } exact) return exact;
+            if (SafeAsmGetType(asm, name) is { } exact) return exact;
 
         // Tier 2: explicit `using` imports win over the implicit standard set, and
         // each tier is searched across ALL assemblies — an assembly-by-assembly loop
@@ -647,13 +689,13 @@ public sealed class TypeResolver
         // a later assembly. (Cross-import ambiguity is reported as ES2151.)
         foreach (var ns in _currentNamespaceImports)
             foreach (var asm in assemblies)
-                if (asm.GetType($"{ns}.{name}") is { } imported) return imported;
+                if (SafeAsmGetType(asm, $"{ns}.{name}") is { } imported) return imported;
 
         // Tier 3: the curated common namespaces — off when the common search is disabled.
         if (_searchCommonNamespaces)
             foreach (var ns in UsingEnvironment.Instance.CommonNamespaces)
                 foreach (var asm in assemblies)
-                    if (asm.GetType($"{ns}.{name}") is { } common) return common;
+                    if (SafeAsmGetType(asm, $"{ns}.{name}") is { } common) return common;
 
         // Tier 4: force-load the backing assembly. A common namespace whose assembly is
         // not yet in the AppDomain (System.Threading.Channels.dll &c.) is invisible to the
@@ -670,21 +712,21 @@ public sealed class TypeResolver
     internal Type? FindOpenGenericByName(string baseName, int arity)
     {
         var mangled = $"{baseName}`{arity}";
-        if (Type.GetType(mangled) is { } qualified) return qualified;
+        if (SafeGetType(mangled) is { } qualified) return qualified;
 
         var assemblies = AppDomain.CurrentDomain.GetAssemblies();
 
         foreach (var asm in assemblies)
-            if (asm.GetType(mangled) is { } exact) return exact;
+            if (SafeAsmGetType(asm, mangled) is { } exact) return exact;
 
         foreach (var ns in _currentNamespaceImports)
             foreach (var asm in assemblies)
-                if (asm.GetType($"{ns}.{mangled}") is { } imported) return imported;
+                if (SafeAsmGetType(asm, $"{ns}.{mangled}") is { } imported) return imported;
 
         if (_searchCommonNamespaces)
             foreach (var ns in UsingEnvironment.Instance.CommonNamespaces)
                 foreach (var asm in assemblies)
-                    if (asm.GetType($"{ns}.{mangled}") is { } common) return common;
+                    if (SafeAsmGetType(asm, $"{ns}.{mangled}") is { } common) return common;
 
         // Tier 4: force-load the backing assembly for an unqualified open generic
         // (Channel`1, ChannelWriter`1, …) the loaded-assembly tiers can't see.
@@ -716,9 +758,20 @@ public sealed class TypeResolver
             "uint" => typeof(uint),
             "ulong" => typeof(ulong),
             "ushort" => typeof(ushort),
+            "nint" => typeof(nint),
+            "nuint" => typeof(nuint),
+            "Guid" => typeof(Guid),
+            "DateTime" => typeof(DateTime),
+            "DateTimeOffset" => typeof(DateTimeOffset),
+            "TimeSpan" => typeof(TimeSpan),
             _ => null,
         },
         ExternalType ext => ResolveExternalToRuntime(ext),
+        // A single-dimension array is a real runtime `T[]`, so it closes a generic
+        // argument (`Dictionary<string, byte[]>`) as `byte[]` instead of erasing to
+        // `object` — which otherwise mistypes indexer/`TryGetValue` results and the
+        // out-var they bind.
+        ArrayBoundType arr => ResolveBoundTypeToRuntime(arr.ElementType) is { } el ? el.MakeArrayType() : null,
         _ => null,
     };
 
@@ -800,7 +853,7 @@ public sealed class TypeResolver
         ["int"] = 4, ["float"] = 4, ["double"] = 8, ["bool"] = 1,
         ["byte"] = 1, ["char"] = 2, ["long"] = 8, ["short"] = 2,
         ["uint"] = 4, ["ulong"] = 8, ["ushort"] = 2, ["sbyte"] = 1,
-        ["decimal"] = 16, ["Guid"] = 16, ["DateTime"] = 8,
+        ["decimal"] = 16, ["nint"] = 8, ["nuint"] = 8, ["Guid"] = 16, ["DateTime"] = 8,
         ["DateTimeOffset"] = 16, ["TimeSpan"] = 8,
     };
 
@@ -853,6 +906,13 @@ public sealed class TypeResolver
             && int.TryParse(memberName.AsSpan(4), out var idx) && idx >= 1 && idx <= tt.ElementTypes.Count)
         {
             return tt.ElementTypes[idx - 1];
+        }
+
+        // Named tuple element access: `t.name` → the type of the element labeled `name`.
+        if (targetType is TupleType named && named.ElementNames is { } labels)
+        {
+            var labelIdx = labels.ToList().IndexOf(memberName);
+            if (labelIdx >= 0) return named.ElementTypes[labelIdx];
         }
 
         // Result<T,E> intrinsic members: `.Value` → T, `.Error` → E,
@@ -909,6 +969,20 @@ public sealed class TypeResolver
                     return ResolveHeapPointerAware(field.Type);
                 cursorSym = cursorSym.BaseType;
             }
+
+            // Inherited BCL-base members. An E# class extending a framework type
+            // (`class ModelFileException : Exception`) exposes that base's public
+            // instance members — `ex.Message`, `ex.InnerException`. The symbol walk above
+            // only covers E# base classes; a BCL base has no E# symbol, so reflect it here
+            // (codegen already walks the emitted Cecil base chain to the getter).
+            if (SymbolOf(dt)?.Decl is DataDeclarationSyntax classDecl)
+                foreach (var baseSyntax in classDecl.Interfaces)
+                {
+                    var runtimeBase = ResolveExternalRuntimeTypeByName(TypeSyntaxLeafName(baseSyntax));
+                    if (runtimeBase is null || runtimeBase.IsInterface) continue;
+                    if (ResolveBclInstanceMemberType(runtimeBase, memberName) is { } inherited)
+                        return inherited;
+                }
         }
 
         // Substitute the data type's open generic parameters with the closed
@@ -1058,6 +1132,20 @@ public sealed class TypeResolver
     // rewrite the member's type — which references the OWNING type's generic parameters
     // by position — with `ext`'s bound arguments. Keeps a generic parameter / user type
     // symbolic instead of erasing it through the runtime reflection round-trip.
+    // A public instance member's type on a BCL type, walking its base classes
+    // (`FlattenHierarchy`): a property/field type, or a zero-arg method's return type.
+    // Null when the type has no such member.
+    static BoundType? ResolveBclInstanceMemberType(Type type, string memberName)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Public
+            | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.FlattenHierarchy;
+        if (type.GetProperty(memberName, flags) is { } p) return MapRuntimeTypeToBoundType(p.PropertyType);
+        if (type.GetField(memberName, flags) is { } f) return MapRuntimeTypeToBoundType(f.FieldType);
+        var m = type.GetMethods(flags).FirstOrDefault(x => x.Name == memberName && x.GetParameters().Length == 0);
+        if (m is not null && m.ReturnType != typeof(void)) return MapRuntimeTypeToBoundType(m.ReturnType);
+        return null;
+    }
+
     BoundType? ResolveExternalMemberSymbolic(ExternalType ext, string memberName)
     {
         var open = FindOpenGenericByName(ext.Name, ext.TypeArgs.Count);

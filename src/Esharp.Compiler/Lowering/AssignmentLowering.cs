@@ -54,26 +54,60 @@ sealed class AssignmentRewriter : SpillingBoundTreeRewriter
             SyntaxTokenKind.MinusEquals => SyntaxTokenKind.Minus,
             SyntaxTokenKind.StarEquals  => SyntaxTokenKind.Star,
             SyntaxTokenKind.SlashEquals => SyntaxTokenKind.Slash,
+            SyntaxTokenKind.PercentEquals => SyntaxTokenKind.Percent,
+            SyntaxTokenKind.AmpersandEquals => SyntaxTokenKind.Ampersand,
+            SyntaxTokenKind.PipeEquals => SyntaxTokenKind.Pipe,
+            SyntaxTokenKind.CaretEquals => SyntaxTokenKind.Caret,
+            SyntaxTokenKind.ShiftLeftEquals => SyntaxTokenKind.ShiftLeft,
+            SyntaxTokenKind.ShiftRightEquals => SyntaxTokenKind.ShiftRight,
+            SyntaxTokenKind.UnsignedShiftRightEquals => SyntaxTokenKind.UnsignedShiftRight,
             _ => throw new InvalidOperationException($"non-compound operator '{node.Op}' on BoundCompoundAssignment"),
         };
 
-        var combined = new BoundBinaryExpression(stable, binOp, value, stable.Type);
+        var combined = node.Combined is { } resolved
+            ? resolved with { Left = stable, Right = value }
+            : new BoundBinaryExpression(stable, binOp, value, stable.Type);
         return Synth.Assign(stable, combined) with { Span = node.Span };
     }
 
-    // Return a target that evaluates exactly once. A name/field target is already stable; an
-    // indexed target with a side-effecting index has that index spilled into a temp so the read
-    // and the write reuse the one evaluation.
+    // Return a target whose receiver and index evaluate exactly once. Both the read and write
+    // use the same synthesized temporaries; this matters for getBox().field += value as well as
+    // getArray()[nextIndex()] += value.
     BoundExpression StabilizeTarget(BoundExpression target)
     {
-        if (target is BoundIndexExpression idx && SideEffects(idx.Index))
+        if (target is BoundMemberAccessExpression member && SideEffects(member.Target))
         {
-            var name = FreshTemp("compIdx");
-            Hoist(Synth.Let(name, idx.Index.Type, idx.Index));
-            return idx with { Index = Synth.Name(name, idx.Index.Type) };
+            var name = FreshTemp("compRecv");
+            Hoist(Synth.Let(name, member.Target.Type, member.Target));
+            return member with { Target = Synth.Name(name, member.Target.Type) };
+        }
+
+        if (target is BoundIndexExpression idx)
+        {
+            var stableTarget = idx.Target;
+            var stableIndex = idx.Index;
+            if (SideEffects(stableTarget))
+            {
+                var name = FreshTemp("compRecv");
+                Hoist(Synth.Let(name, stableTarget.Type, stableTarget));
+                stableTarget = Synth.Name(name, stableTarget.Type);
+            }
+            if (SideEffects(stableIndex))
+            {
+                var name = FreshTemp("compIdx");
+                Hoist(Synth.Let(name, stableIndex.Type, stableIndex));
+                stableIndex = Synth.Name(name, stableIndex.Type);
+            }
+            return idx with { Target = stableTarget, Index = stableIndex };
         }
         return target;
     }
 
-    static bool SideEffects(BoundExpression e) => e is BoundCallExpression or BoundAwaitExpression;
+    static bool SideEffects(BoundExpression e) => e switch
+    {
+        BoundCallExpression or BoundAwaitExpression or BoundObjectCreationExpression => true,
+        BoundMemberAccessExpression member => SideEffects(member.Target),
+        BoundIndexExpression index => SideEffects(index.Target) || SideEffects(index.Index),
+        _ => false,
+    };
 }

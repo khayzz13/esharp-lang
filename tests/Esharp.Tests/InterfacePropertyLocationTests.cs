@@ -76,16 +76,14 @@ class Counter : ICounter {
     }
 
     [Fact]
-    public void DirectField_SynthesizesDurableInterfaceLocation()
+    public void DirectField_CannotImplementDurableInterfaceLocation()
     {
-        Assert.Equal(42, Run("""
+        var diagnostics = Diagnostics("""
 namespace Test
 interface ICounter { var value: int { get set loca } }
 class Counter : ICounter { pub value: int = 41 }
-func increment(value: *int) { value += 1 }
-func update(counter: ICounter) -> int { increment(&counter.value) return counter.value }
-func go() -> int { return update(Counter()) }
-"""));
+""");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "ES2226");
     }
 
     [Fact]

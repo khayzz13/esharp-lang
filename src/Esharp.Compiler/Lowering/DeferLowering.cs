@@ -1,3 +1,4 @@
+using System.Linq;
 using Esharp.BoundTree;
 
 namespace Esharp.Lowering;
@@ -33,6 +34,26 @@ sealed class DeferRewriter : LoweringRewriter
     {
         var body = (BoundBlockStatement)RewriteStatement(node.Body);
         return ReferenceEquals(body, node.Body) ? node : node with { Body = body };
+    }
+
+    // The base RewriteTryStatement rewrites the try/catch bodies through the private
+    // RewriteBlock helper, which bypasses this pass's RewriteBlockStatement override — so a
+    // `defer` inside a `try` block (`try { let s = open()  defer { s.close() }  … }`, the
+    // spec's `finally`-equivalent) would survive lowering. Route those blocks through
+    // RewriteStatement (which dispatches to the override) so try-body defers become nested
+    // try/finally regions exactly like function-body defers.
+    protected override BoundStatement RewriteTryStatement(BoundTryStatement node)
+    {
+        var body = (BoundBlockStatement)RewriteStatement(node.Body);
+        var catches = node.Catches.Select(c =>
+        {
+            var cb = (BoundBlockStatement)RewriteStatement(c.Body);
+            var guard = c.Guard is { } g ? RewriteExpression(g) : null;
+            return ReferenceEquals(cb, c.Body) && ReferenceEquals(guard, c.Guard)
+                ? c
+                : c with { Body = cb, Guard = guard };
+        }).ToList();
+        return node with { Body = body, Catches = catches };
     }
 
     protected override BoundStatement RewriteBlockStatement(BoundBlockStatement node)

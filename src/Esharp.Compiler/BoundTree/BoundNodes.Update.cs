@@ -541,6 +541,22 @@ public partial record BoundArrayCreationExpression
     }
 }
 
+public partial record BoundStackAllocExpression
+{
+    public BoundStackAllocExpression Update(
+        BoundType elementType,
+        BoundExpression size,
+        BoundType type
+    )
+    {
+        if (ReferenceEquals(elementType, ElementType)
+         && ReferenceEquals(size, Size)
+         && ReferenceEquals(type, Type))
+            return this;
+        return this with { ElementType = elementType, Size = size, Type = type };
+    }
+}
+
 public partial record BoundTupleLiteralExpression
 {
     public BoundTupleLiteralExpression Update(

@@ -69,6 +69,11 @@ public sealed class Lexer
         var c = Cursor.Current;
         if (c is '\r' or '\n')
             return _operators.ScanNewLine();
+        // `b"…"` — a byte-string literal. Checked before the identifier scan (which would
+        // otherwise take the `b`), and unambiguous: an identifier immediately followed by
+        // a string is never valid E#, so `b"` only ever opens a byte string.
+        if (c == 'b' && Cursor.Peek(1) == '"')
+            return _literals.ScanByteString();
         if (LexicalFacts.IsIdentifierStart(c))
             return ScanIdentifier(pos, line, col);
         if (char.IsDigit(c))

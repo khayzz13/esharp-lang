@@ -30,6 +30,7 @@ public partial class MethodBodyEmitter
     // it and install their own SelfFieldSlot entries against it.
     private protected Dictionary<string, FieldDefinition>? _displayClassFields;
     private protected readonly string? _selfParamName;
+    private protected readonly bool _contractFma;
 
     /// Whether a bare name denotes the method's receiver. Two spellings map to it:
     /// the explicit receiver name from a `func (c: T)` block (`_selfParamName`), and
@@ -100,13 +101,15 @@ public partial class MethodBodyEmitter
         ILTypeResolver types,
         DiagnosticBag diagnostics,
         Dictionary<string, FieldDefinition>? structFields = null,
-        string? selfParamName = null)
+        string? selfParamName = null,
+        bool contractFma = false)
     {
         _method = method;
         _il = new ILBuilder(method);
         _types = types;
         _diagnostics = diagnostics;
         _selfParamName = selfParamName;
+        _contractFma = contractFma;
 
         // When constructed as a nested/child emitter on a display class instance
         // method, `structFields` carries the display class's fields and every bare
@@ -1352,6 +1355,9 @@ public partial class MethodBodyEmitter
 
                 _lastCallWasVoid = false;
                 break;
+            case BoundStackAllocExpression sa:
+                EmitStackAlloc(sa);
+                break;
             case BoundTupleLiteralExpression tuple:
                 EmitTupleLiteral(tuple);
                 break;
@@ -1384,6 +1390,9 @@ public partial class MethodBodyEmitter
                     "BoundResultCallExpression reached EmitExpression. ResultLowering must have failed.");
             case BoundIndexExpression idx:
                 EmitIndexRead(idx);
+                break;
+            case BoundRangeExpression { Target: not null } slice:
+                EmitRangeSlice(slice);
                 break;
             case BoundFunctionLiteralExpression:
                 throw new FeatureNodeInCodeGenException(
@@ -1711,6 +1720,10 @@ public partial class MethodBodyEmitter
             // must be boxed. Keying off the raw `!0` skipped the box and produced
             // unverifiable IL (StackUnexpected: Int32 where ref 'object' expected).
             var paramType = EffectiveParameterType(methodRef, parameterIndex);
+            // BCL implicit span conversion: an array / `Span<T>` argument flowing into
+            // a span parameter (`MemoryStream.Write(ReadOnlySpan<byte>)`, the bulk
+            // `BinaryPrimitives`/`MemoryMarshal` surface). Emits op_Implicit.
+            if (TryEmitSpanArg(arg, paramType)) continue;
             // Still an unsubstituted generic parameter (e.g. a method-level `!!0`
             // with no closed instance) — the CLR substitution handles it at the
             // closed call site; pre-boxing there would be invalid IL.

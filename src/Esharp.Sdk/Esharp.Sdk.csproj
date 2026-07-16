@@ -10,12 +10,24 @@
     <Description>E# language SDK for .NET</Description>
     <PackageType>MSBuildSdk</PackageType>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+
+    <!-- The EsharpCompile task assembly + the compiler it loads are bundled under
+         tools/net10.0/ (Sdk.targets resolves the task there). `install-sdk.sh`
+         publishes Esharp.Build to this folder before packing so the packaged SDK
+         always carries the freshly-built compiler. -->
+    <EsharpBuildPublishDir Condition="'$(EsharpBuildPublishDir)' == ''">$(MSBuildThisFileDirectory)../Esharp.Build/bin/$(Configuration)/net10.0/publish/</EsharpBuildPublishDir>
   </PropertyGroup>
 
   <!-- Pack the Sdk props/targets into the right NuGet layout -->
   <ItemGroup>
     <None Include="Sdk/Sdk.props" Pack="true" PackagePath="Sdk/" />
     <None Include="Sdk/Sdk.targets" Pack="true" PackagePath="Sdk/" />
+  </ItemGroup>
+
+  <!-- Pack the published compiler (Esharp.Build.dll + Esharp.Compiler.dll + Cecil/
+       Roslyn deps + satellite resources) under tools/net10.0/. -->
+  <ItemGroup>
+    <None Include="$(EsharpBuildPublishDir)**\*" Pack="true" PackagePath="tools/net10.0/" />
   </ItemGroup>
 
 </Project>

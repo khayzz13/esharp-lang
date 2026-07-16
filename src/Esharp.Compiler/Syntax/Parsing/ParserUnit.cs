@@ -26,6 +26,8 @@ abstract class ParserUnit
     protected SourceSpan SpanFrom(SyntaxToken start) => P.Cursor.SpanFrom(start);
     protected SourceSpan SpanOf(SyntaxToken token) => P.Cursor.SpanOf(token);
     protected void Report(int line, int column, string message) => P.Cursor.Report(line, column, message);
+    protected void Report(int line, int column, Esharp.Diagnostics.DiagnosticDescriptor descriptor, params object[] args) =>
+        P.Cursor.Report(line, column, descriptor, args);
 
     // Cross-domain wiring. The high-frequency siblings get shortcuts; the match
     // and concurrency parsers are reached as `P.Match` / `P.Concurrency` at their

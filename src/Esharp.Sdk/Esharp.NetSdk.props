@@ -14,6 +14,9 @@
     <EnableDefaultItems Condition="'$(EnableDefaultItems)' == ''">false</EnableDefaultItems>
     <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
     <DebugSymbols Condition="'$(DebugSymbols)' == ''">true</DebugSymbols>
+    <EsharpOptimizationLevel Condition="'$(EsharpOptimizationLevel)' == '' and '$(Optimize)' == 'true'">Release</EsharpOptimizationLevel>
+    <EsharpOptimizationLevel Condition="'$(EsharpOptimizationLevel)' == ''">Debug</EsharpOptimizationLevel>
+    <EsharpShowAllocations Condition="'$(EsharpShowAllocations)' == ''">false</EsharpShowAllocations>
     <!-- Implicit (standard BCL namespace) usings. Honor the conventional
          <ImplicitUsings>enable|disable</ImplicitUsings>, falling back to true. -->
     <EnableImplicitUsings Condition="'$(EnableImplicitUsings)' == '' and ('$(ImplicitUsings)' == 'disable' or '$(ImplicitUsings)' == 'false')">false</EnableImplicitUsings>

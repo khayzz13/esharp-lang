@@ -14,6 +14,26 @@ public static partial class CodeGenerator
     internal static string MetadataTypeName(string name, int arity)
         => arity > 0 ? name + "`" + arity : name;
 
+    /// Apply per-type-parameter CLR constraints (P3). Today only `"unmanaged"` is
+    /// modeled — the exact shape Roslyn emits for `where T : unmanaged`: the
+    /// NotNullableValueType flag plus a `System.ValueType modreq(UnmanagedType)`
+    /// constraint, so `MemoryMarshal.AsBytes<T>` / span reinterpretation type-check.
+    internal static void ApplyGenericConstraints(
+        Mono.Collections.Generic.Collection<GenericParameter> gps,
+        IReadOnlyList<string?>? constraints, ModuleDefinition module)
+    {
+        if (constraints is null) return;
+        for (var i = 0; i < gps.Count && i < constraints.Count; i++)
+        {
+            if (constraints[i] != "unmanaged") continue;
+            var gp = gps[i];
+            gp.Attributes |= GenericParameterAttributes.NotNullableValueTypeConstraint;
+            var valueType = module.ImportReference(typeof(System.ValueType));
+            var unmanagedMod = module.ImportReference(typeof(System.Runtime.InteropServices.UnmanagedType));
+            gp.Constraints.Add(new GenericParameterConstraint(new RequiredModifierType(unmanagedMod, valueType)));
+        }
+    }
+
     /// A data declaration's conformances as structured, symbol-linked types — the
     /// emitter's single conformance currency. Identity is carried by the BoundType
     /// (and its TypeSymbol); a display name is derived on demand via EmitName.
@@ -78,6 +98,7 @@ public static partial class CodeGenerator
         // in the populate phase can bind `A`/`B` to the right slot.
         foreach (var tp in data.TypeParameters)
             typeDef.GenericParameters.Add(new GenericParameter(tp, typeDef));
+        ApplyGenericConstraints(typeDef.GenericParameters, data.GenericConstraints, module);
 
         module.Types.Add(typeDef);
         types.Register(data.Name, typeDef, ns, data.TypeParameters.Count);
@@ -119,6 +140,12 @@ public static partial class CodeGenerator
                 typeDef.BaseType = baseRef;
             else if (types.TryResolveRuntimeType(baseName) is { } extBaseRt)
                 typeDef.BaseType = module.ImportReference(extBaseRt);
+            // A same-project C# base (mixed-language `class Derived : CsBase`): not an
+            // E#-emitted type and not a runtime type (the C# half isn't emitted yet), so it
+            // resolves through the cross-language adapter to a forward typeref scoped to the
+            // C# half — ILRepack fuses it to the merged assembly.
+            else if (types.TryResolveByName(baseName) is { } csBaseRef)
+                typeDef.BaseType = csBaseRef;
         }
 
         // Add interface implementations for protocol conformance. ResolveConformanceInterface
@@ -481,14 +508,17 @@ public static partial class CodeGenerator
                     : null);
             if (backing is null) continue;
 
-            var access = field.Vis switch
+            // Per-accessor visibility (P8): `get`/`set` fall back to the property's own
+            // visibility, but a `pub var X { priv set }` narrows just the setter.
+            static MethodAttributes VisAttr(Esharp.Syntax.Visibility v) => v switch
             {
                 Esharp.Syntax.Visibility.Public => MethodAttributes.Public,
                 Esharp.Syntax.Visibility.Private => MethodAttributes.Private,
                 _ => MethodAttributes.Assembly,
             };
-            var attrs = access | MethodAttributes.HideBySig | MethodAttributes.SpecialName;
-            var getter = new MethodDefinition("get_" + field.Name, attrs, backing.FieldType);
+            var getAttrs = VisAttr(field.GetterVis ?? field.Vis) | MethodAttributes.HideBySig | MethodAttributes.SpecialName;
+            var setAttrs = VisAttr(field.SetterVis ?? field.Vis) | MethodAttributes.HideBySig | MethodAttributes.SpecialName;
+            var getter = new MethodDefinition("get_" + field.Name, getAttrs, backing.FieldType);
             getter.Body.InitLocals = true;
             typeDef.Methods.Add(getter);
 
@@ -500,7 +530,7 @@ public static partial class CodeGenerator
                     ? new RequiredModifierType(module.ImportReference(
                         typeof(System.Runtime.CompilerServices.IsExternalInit)), voidRef)
                     : voidRef;
-                setter = new MethodDefinition("set_" + field.Name, attrs, returnType);
+                setter = new MethodDefinition("set_" + field.Name, setAttrs, returnType);
                 setter.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, backing.FieldType));
                 setter.Body.InitLocals = true;
                 typeDef.Methods.Add(setter);
@@ -546,7 +576,7 @@ public static partial class CodeGenerator
                 var locationStorage = typeDef.Fields.FirstOrDefault(f => f.Name == field.PropLocaStorageName)
                     ?? backing;
                 var loca = new MethodDefinition("getloca_" + field.Name,
-                    attrs | MethodAttributes.SpecialName,
+                    getAttrs | MethodAttributes.SpecialName,
                     new ByReferenceType(locationStorage.FieldType));
                 loca.Body.InitLocals = true;
                 var locaIl = new ILBuilder(loca);

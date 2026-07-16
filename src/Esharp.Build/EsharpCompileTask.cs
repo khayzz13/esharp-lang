@@ -30,6 +30,15 @@ public sealed class EsharpCompile : Microsoft.Build.Utilities.Task
     public bool DebugSymbols { get; set; } = true;
 
     /// <summary>
+    /// E# code-generation policy. Accepted values are Debug and Release; this is
+    /// deliberately independent from DebugSymbols so optimized builds may still
+    /// produce portable PDBs.
+    /// </summary>
+    public string OptimizationLevel { get; set; } = "Debug";
+
+    public bool ShowAllocations { get; set; }
+
+    /// <summary>
     /// MSBuild $(OutputType). "Exe"/"WinExe" emit a console application with an
     /// entry point (E# `func main()` or a C# `Main`); anything else (or empty)
     /// emits a library. Default preserves the prior library-only behavior.
@@ -79,8 +88,12 @@ public sealed class EsharpCompile : Microsoft.Build.Utilities.Task
                 ? OutputKind.Console
                 : OutputKind.Library;
 
+        var optimization = string.Equals(OptimizationLevel, "Release", StringComparison.OrdinalIgnoreCase)
+            ? Esharp.Compilation.OptimizationLevel.Release
+            : Esharp.Compilation.OptimizationLevel.Debug;
         var workspace = new Workspace(asmName, refPaths, outputKind,
-            new ProjectOptions(EnableImplicitUsings: EnableImplicitUsings));
+            new ProjectOptions(EnableImplicitUsings: EnableImplicitUsings, Optimization: optimization,
+                ShowAllocations: ShowAllocations));
         foreach (var item in Sources)
         {
             var filePath = item.GetMetadata("FullPath");

@@ -269,7 +269,8 @@ sealed class StatementParser : ParserUnit
         // — the postfix entry below has no unary-prefix path and would reject the leading
         // `-` (probe3 #5: a bare `-1` match-arm value). Address-of/deref (`&`/`*`) are left
         // to the postfix+continuation path, which already handles their statement forms.
-        if (Current.Kind is SyntaxTokenKind.Minus or SyntaxTokenKind.Bang or SyntaxTokenKind.NotKeyword)
+        if (Current.Kind is SyntaxTokenKind.Plus or SyntaxTokenKind.Minus or SyntaxTokenKind.Bang
+            or SyntaxTokenKind.Tilde or SyntaxTokenKind.NotKeyword)
             return new ExpressionStatementSyntax(Expressions.ParseExpression()) { Span = SpanFrom(span) };
 
         var expr = Expressions.ParsePostfixExpression();
@@ -282,7 +283,9 @@ sealed class StatementParser : ParserUnit
         }
 
         if (Current.Kind is SyntaxTokenKind.PlusEquals or SyntaxTokenKind.MinusEquals
-            or SyntaxTokenKind.StarEquals or SyntaxTokenKind.SlashEquals)
+            or SyntaxTokenKind.StarEquals or SyntaxTokenKind.SlashEquals or SyntaxTokenKind.PercentEquals
+            or SyntaxTokenKind.AmpersandEquals or SyntaxTokenKind.PipeEquals or SyntaxTokenKind.CaretEquals
+            or SyntaxTokenKind.ShiftLeftEquals or SyntaxTokenKind.ShiftRightEquals or SyntaxTokenKind.UnsignedShiftRightEquals)
         {
             var op = NextToken().Kind;
             var value = Expressions.ParseExpression();

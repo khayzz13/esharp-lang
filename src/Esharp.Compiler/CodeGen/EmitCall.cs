@@ -119,8 +119,17 @@ public partial class MethodBodyEmitter
             if (ok && !cand.IsGenericMethodDefinition) return cand;
         }
 
-        // Generic method: infer type args from the provided runtime arg types.
-        var generic = candidates.FirstOrDefault(m => m.IsGenericMethodDefinition);
+        // Generic method: pick the overload whose parameter SHAPES best match the
+        // arguments before inferring type args. Critically, a `ReadOnlySpan<T>` argument
+        // must select a `ReadOnlySpan<T>` overload over a sibling `Span<T>` one —
+        // `MemoryMarshal.AsBytes` / `Cast` expose exactly that pair, and picking the
+        // first-declared generic overload bound a ReadOnlySpan arg to the Span overload
+        // (unverifiable IL). Score by matching each parameter's generic type definition
+        // against the argument's; ties keep declaration order.
+        var generic = candidates
+            .Where(m => m.IsGenericMethodDefinition)
+            .OrderByDescending(m => GenericParamShapeScore(m.GetParameters(), argTypes))
+            .FirstOrDefault();
         if (generic is null) return candidates[0];
 
         var typeParams = generic.GetGenericArguments();
@@ -141,6 +150,23 @@ public partial class MethodBodyEmitter
 
         try { return generic.MakeGenericMethod(inferred); }
         catch { return null; }
+    }
+
+    /// How many parameters' generic type definitions match the corresponding argument's
+    /// — the discriminator between overloads that differ only by a constructed-generic
+    /// parameter (`Span<T>` vs `ReadOnlySpan<T>`, `List<T>` vs `IEnumerable<T>`).
+    static int GenericParamShapeScore(System.Reflection.ParameterInfo[] ps, Type[] argTypes)
+    {
+        var score = 0;
+        for (var i = 0; i < ps.Length && i < argTypes.Length; i++)
+        {
+            var pt = ps[i].ParameterType;
+            var at = argTypes[i];
+            if (pt.IsGenericType && at.IsGenericType
+                && pt.GetGenericTypeDefinition() == at.GetGenericTypeDefinition())
+                score++;
+        }
+        return score;
     }
 
     /// Reflect on `aw.Inner` to determine the exact runtime awaitable type
@@ -711,13 +737,33 @@ public partial class MethodBodyEmitter
             catch { return 0; }
         }).ToArray();
 
+        // The open generic type-definition each argument is constructed from
+        // (`System.ReadOnlySpan`1`), so overloads that differ ONLY by which
+        // constructed generic they take — `Cast<TFrom,TTo>(Span<TFrom>)` vs
+        // `Cast<TFrom,TTo>(ReadOnlySpan<TFrom>)`, `AsBytes` likewise — are
+        // discriminated by matching the parameter's own generic definition.
+        // Shape depth alone ties them (both are depth-1 generics), so without
+        // this a ReadOnlySpan arg binds to the Span overload → unverifiable IL.
+        static string? OpenDefName(Type t) =>
+            t.IsGenericType ? t.GetGenericTypeDefinition().FullName : null;
+        var argumentDefNames = args.Select(arg =>
+        {
+            try { return _types.Resolve(arg.Type) is GenericInstanceType g ? g.ElementType.FullName : null; }
+            catch { return null; }
+        }).ToArray();
+        int DefNameMatchCount(System.Reflection.MethodInfo m) => m.GetParameters()
+            .Where((p, i) => i < argumentDefNames.Length
+                && OpenDefName(p.ParameterType) is { } d && d == argumentDefNames[i])
+            .Count();
+
         var openInfo = runtimeType
             .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
             .Where(m => m.Name == ma.MemberName
                 && m.IsGenericMethodDefinition
                 && m.GetGenericArguments().Length == explicitTypeArgs.Count
                 && m.GetParameters().Length == args.Count)
-            .OrderBy(m => m.GetParameters()
+            .OrderByDescending(DefNameMatchCount)
+            .ThenBy(m => m.GetParameters()
                 .Select((p, i) => Math.Abs(GenericShapeDepth(p.ParameterType) - argumentShapeDepths[i]))
                 .Sum())
             .ThenByDescending(m => m.GetParameters().Sum(p => GenericShapeDepth(p.ParameterType)))
@@ -1578,10 +1624,20 @@ public partial class MethodBodyEmitter
                 var extensionRef = _types.ResolveExtensionMethod(instanceRuntimeType, ma.MemberName, args.Count, argTypes, explicitRuntimeTypeArgs);
                 if (extensionRef is not null)
                 {
-                    if (isValueType)
+                    // The receiver is the extension's first parameter — an ORDINARY by-value
+                    // parameter (`SequenceEqual(this ReadOnlySpan<T>, …)`), not an instance
+                    // `this`. Emit it by value; take its address only when the parameter is
+                    // genuinely by-ref (`this ref`/`this in`). Then apply the same span
+                    // coercion the value args get, so a `Span<T>` receiver flows into a
+                    // `ReadOnlySpan<T>` `this` (`op_Implicit`).
+                    var recvParam = EffectiveParameterType(extensionRef, 0);
+                    if (recvParam.IsByReference)
                         EmitAddress(ma.Target);
                     else
+                    {
                         EmitExpression(ma.Target);
+                        TryEmitSpanArg(ma.Target, recvParam);
+                    }
                     EmitCallArgsCoerced(args, extensionRef, parameterOffset: 1);
                     _il.Call(extensionRef);
                     if (extensionRef.ReturnType.FullName == "System.Void") _lastCallWasVoid = true;

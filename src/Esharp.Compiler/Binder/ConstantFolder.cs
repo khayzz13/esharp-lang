@@ -27,10 +27,20 @@ public static class ConstantFolder
                             long l => new BoundLiteralExpression(-l, (-l).ToString(), inner.Type),
                             float f => new BoundLiteralExpression(-f, (-f).ToString(), inner.Type),
                             double d => new BoundLiteralExpression(-d, (-d).ToString(), inner.Type),
+                            decimal d => new BoundLiteralExpression(-d, (-d).ToString(System.Globalization.CultureInfo.InvariantCulture), inner.Type),
                             _ => null,
                         };
                     case SyntaxTokenKind.Bang or SyntaxTokenKind.NotKeyword:
                         return inner.Value is bool b ? new BoundLiteralExpression(!b, (!b).ToString(), inner.Type) : null;
+                    case SyntaxTokenKind.Plus:
+                        return inner;
+                    case SyntaxTokenKind.Tilde:
+                        return inner.Value switch
+                        {
+                            int i => new BoundLiteralExpression(~i, (~i).ToString(), inner.Type),
+                            long l => new BoundLiteralExpression(~l, (~l).ToString(), inner.Type),
+                            _ => null,
+                        };
                 }
                 return null;
             case BoundBinaryExpression bin:
@@ -76,6 +86,12 @@ public static class ConstantFolder
                 SyntaxTokenKind.Star => Lit(li * ri, new PrimitiveType("int")),
                 SyntaxTokenKind.Slash when ri != 0 => Lit(li / ri, new PrimitiveType("int")),
                 SyntaxTokenKind.Percent when ri != 0 => Lit(li % ri, new PrimitiveType("int")),
+                SyntaxTokenKind.Ampersand => Lit(li & ri, new PrimitiveType("int")),
+                SyntaxTokenKind.Pipe => Lit(li | ri, new PrimitiveType("int")),
+                SyntaxTokenKind.Caret => Lit(li ^ ri, new PrimitiveType("int")),
+                SyntaxTokenKind.ShiftLeft => Lit(li << ri, new PrimitiveType("int")),
+                SyntaxTokenKind.ShiftRight => Lit(li >> ri, new PrimitiveType("int")),
+                SyntaxTokenKind.UnsignedShiftRight => Lit(li >>> ri, new PrimitiveType("int")),
                 SyntaxTokenKind.EqualsEquals => Lit(li == ri, new PrimitiveType("bool")),
                 SyntaxTokenKind.BangEquals => Lit(li != ri, new PrimitiveType("bool")),
                 SyntaxTokenKind.Less => Lit(li < ri, new PrimitiveType("bool")),
@@ -93,6 +109,28 @@ public static class ConstantFolder
                 SyntaxTokenKind.Slash when rd != 0 => Lit(ld / rd, new PrimitiveType("double")),
                 _ => null,
             };
+        if (l.Value is decimal lm && r.Value is decimal rm)
+        {
+            try
+            {
+                return op switch
+                {
+                    SyntaxTokenKind.Plus => Lit(lm + rm, new PrimitiveType("decimal")),
+                    SyntaxTokenKind.Minus => Lit(lm - rm, new PrimitiveType("decimal")),
+                    SyntaxTokenKind.Star => Lit(lm * rm, new PrimitiveType("decimal")),
+                    SyntaxTokenKind.Slash when rm != 0 => Lit(lm / rm, new PrimitiveType("decimal")),
+                    SyntaxTokenKind.Percent when rm != 0 => Lit(lm % rm, new PrimitiveType("decimal")),
+                    SyntaxTokenKind.EqualsEquals => Lit(lm == rm, new PrimitiveType("bool")),
+                    SyntaxTokenKind.BangEquals => Lit(lm != rm, new PrimitiveType("bool")),
+                    SyntaxTokenKind.Less => Lit(lm < rm, new PrimitiveType("bool")),
+                    SyntaxTokenKind.LessEquals => Lit(lm <= rm, new PrimitiveType("bool")),
+                    SyntaxTokenKind.Greater => Lit(lm > rm, new PrimitiveType("bool")),
+                    SyntaxTokenKind.GreaterEquals => Lit(lm >= rm, new PrimitiveType("bool")),
+                    _ => null,
+                };
+            }
+            catch (OverflowException) { return null; }
+        }
         if (l.Value is bool lb && r.Value is bool rb)
             return op switch
             {
@@ -100,6 +138,9 @@ public static class ConstantFolder
                 SyntaxTokenKind.PipePipe or SyntaxTokenKind.OrKeyword => Lit(lb || rb, new PrimitiveType("bool")),
                 SyntaxTokenKind.EqualsEquals => Lit(lb == rb, new PrimitiveType("bool")),
                 SyntaxTokenKind.BangEquals => Lit(lb != rb, new PrimitiveType("bool")),
+                SyntaxTokenKind.Ampersand => Lit(lb & rb, new PrimitiveType("bool")),
+                SyntaxTokenKind.Pipe => Lit(lb | rb, new PrimitiveType("bool")),
+                SyntaxTokenKind.Caret => Lit(lb ^ rb, new PrimitiveType("bool")),
                 _ => null,
             };
         return null;

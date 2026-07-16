@@ -122,8 +122,8 @@ public sealed class LoweringPipeline
             $"Lowering pipeline produced {violations.Count} surviving FEATURE node(s):\n{summary}");
 #else
         foreach (var (nodeType, span) in violations)
-            program.Data.Diagnostics.Add(Diagnostic.InternalError(
-                $"FEATURE node '{nodeType}' was not lowered before CodeGen", span));
+            program.Data.Diagnostics.Report(span, DiagnosticDescriptors.InternalError,
+                $"FEATURE node '{nodeType}' was not lowered before CodeGen");
 #endif
     }
 

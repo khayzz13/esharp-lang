@@ -308,7 +308,27 @@ internal sealed class StatementBinder : BinderUnit
                 Expressions.BindExpression(syntax.Value, eventDelegateType))
             { IsEventSubscription = true };
         CheckMutability(target, syntax.Target);
-        return new(target, syntax.Operator, Expressions.BindExpression(syntax.Value));
+        var binaryOp = syntax.Operator switch
+        {
+            SyntaxTokenKind.PlusEquals => SyntaxTokenKind.Plus,
+            SyntaxTokenKind.MinusEquals => SyntaxTokenKind.Minus,
+            SyntaxTokenKind.StarEquals => SyntaxTokenKind.Star,
+            SyntaxTokenKind.SlashEquals => SyntaxTokenKind.Slash,
+            SyntaxTokenKind.PercentEquals => SyntaxTokenKind.Percent,
+            SyntaxTokenKind.AmpersandEquals => SyntaxTokenKind.Ampersand,
+            SyntaxTokenKind.PipeEquals => SyntaxTokenKind.Pipe,
+            SyntaxTokenKind.CaretEquals => SyntaxTokenKind.Caret,
+            SyntaxTokenKind.ShiftLeftEquals => SyntaxTokenKind.ShiftLeft,
+            SyntaxTokenKind.ShiftRightEquals => SyntaxTokenKind.ShiftRight,
+            SyntaxTokenKind.UnsignedShiftRightEquals => SyntaxTokenKind.UnsignedShiftRight,
+            _ => SyntaxTokenKind.BadToken,
+        };
+        var combined = (BoundBinaryExpression)Expressions.BindExpression(
+            new BinaryExpressionSyntax(syntax.Target, binaryOp, syntax.Value) { Span = syntax.Span }, target.Type);
+        if (TypeDisplayName(combined.Type) != TypeDisplayName(target.Type))
+            Diagnostics.Report(syntax.Span,
+                $"ES2282: compound operator result '{TypeDisplayName(combined.Type)}' is not exactly assignable to '{TypeDisplayName(target.Type)}'.");
+        return new(combined.Left, syntax.Operator, combined.Right) { Combined = combined };
     }
 
     bool IsEventSubscriptionTarget(BoundExpression target, SyntaxTokenKind op, out BoundType? eventDelegateType)
@@ -461,6 +481,11 @@ internal sealed class StatementBinder : BinderUnit
         if (syntax.IsAwait)
             Ctx.CurrentFunctionHasAwait = true;
         var collection = Expressions.BindExpression(syntax.Collection);
+        if (Data.ShowAllocations && !syntax.IsAwait
+            && collection.Type is not ArrayBoundType
+            && collection.Type is not PrimitiveType { Name: "Range" })
+            Diagnostics.Warn(syntax.Collection.Span, DiagnosticDescriptors.EnumeratorAllocation,
+                TypeDisplayName(collection.Type));
         var elementType = InferForEachElementType(collection.Type);
         var prevScope = Scope;
         Scope = Scope.Child();
@@ -612,7 +637,7 @@ internal sealed class StatementBinder : BinderUnit
     static BoundType BoundFromTypeRef(Esharp.Symbols.TypeRef r) =>
         r.Symbol.BoundView is { } bv ? bv
         : r.Symbol.Name is "int" or "string" or "bool" or "float" or "double" or "byte"
-            or "char" or "long" or "short" or "uint" or "ulong" or "ushort" or "sbyte" or "decimal"
+            or "char" or "long" or "short" or "uint" or "ulong" or "ushort" or "sbyte" or "nint" or "nuint" or "decimal"
             ? new PrimitiveType(r.Symbol.Name)
         : new ExternalType(r.Symbol.Name);
 
@@ -622,9 +647,10 @@ internal sealed class StatementBinder : BinderUnit
             Diagnostics.Report(syntax.Span, "ES2207: 'return' is not valid inside a namespace 'init' block.");
         // Thread the declared return type so target-typed conversions (method-group →
         // delegate, lambda → delegate/fn-ptr) fire in return position too.
-        return new BoundReturnStatement(syntax.Expression is not null
-            ? Expressions.BindExpression(syntax.Expression, Ctx.CurrentReturnType)
-            : null);
+        if (syntax.Expression is null)
+            return new BoundReturnStatement(null);
+        var value = Expressions.BindExpression(syntax.Expression, Ctx.CurrentReturnType);
+        return new BoundReturnStatement(Expressions.Coerce(value, Ctx.CurrentReturnType));
     }
 
     BoundAsyncLetStatement BindAsyncLet(AsyncLetStatementSyntax syntax)

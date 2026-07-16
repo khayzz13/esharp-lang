@@ -95,6 +95,9 @@ public sealed partial record BoundDataDeclaration(
     /// Declared visibility — drives nested-type emission (NestedPublic / NestedAssembly
     /// / NestedPrivate). `IsPublic` stays the top-level public-vs-not face.
     public Syntax.Visibility Visibility { get; init; } = IsPublic ? Syntax.Visibility.Public : Syntax.Visibility.Internal;
+    /// Per-type-parameter bounds aligned with <see cref="TypeParameters"/>; `"unmanaged"`
+    /// emits the CLR unmanaged constraint (P3), null is unbounded.
+    public IReadOnlyList<string?>? GenericConstraints { get; init; }
 }
 
 public sealed partial record BoundInterfaceDeclaration(bool IsPublic, string Name, IReadOnlyList<string> TypeParameters, IReadOnlyList<BoundInterfaceMethod> Methods, IReadOnlyList<BoundField>? Events = null, string? DeclaringTypeKey = null, IReadOnlyList<BoundInterfaceProperty>? Properties = null) : BoundMember
@@ -133,7 +136,7 @@ public sealed partial record BoundChoiceDeclaration(bool IsPublic, bool IsRef, s
     public Syntax.Visibility Visibility { get; init; } = IsPublic ? Syntax.Visibility.Public : Syntax.Visibility.Internal;
 }
 public sealed partial record BoundEnumCase(string Name, int Value);
-public sealed partial record BoundEnumDeclaration(bool IsPublic, string Name, IReadOnlyList<BoundEnumCase> Cases, string? DeclaringTypeKey = null) : BoundMember
+public sealed partial record BoundEnumDeclaration(bool IsPublic, string Name, IReadOnlyList<BoundEnumCase> Cases, string? DeclaringTypeKey = null, string UnderlyingType = "int") : BoundMember
 {
     public Syntax.Visibility Visibility { get; init; } = IsPublic ? Syntax.Visibility.Public : Syntax.Visibility.Internal;
 }
@@ -178,6 +181,18 @@ public sealed partial record BoundFunctionDeclaration(
     /// is lowering metadata, not source syntax: CodeGen uses it to emit the CLR
     /// AsyncStateMachineAttribute with the exact generated type token.
     public BoundType? AsyncStateMachineType { get; init; }
+
+    /// Release-only permission to contract directly-written multiply/add shapes.
+    /// This is compiler state, not a CLR attribute.
+    public bool ContractFma { get; init; }
+
+    /// Source operator identity. Operator functions are ordinary static methods
+    /// in metadata, but remain distinct from identifier-named calls in binding.
+    public SyntaxTokenKind? OperatorKind { get; init; }
+
+    /// Per-type-parameter bounds aligned with <see cref="TypeParameters"/>; `"unmanaged"`
+    /// emits the CLR unmanaged constraint (P3), null is unbounded.
+    public IReadOnlyList<string?>? GenericConstraints { get; init; }
 }
 
 public sealed partial record BoundStaticFuncDeclaration(
@@ -187,6 +202,7 @@ public sealed partial record BoundStaticFuncDeclaration(
     string? DeclaringTypeKey = null) : BoundMember
 {
     public Syntax.Visibility Visibility { get; init; } = IsPublic ? Syntax.Visibility.Public : Syntax.Visibility.Internal;
+    public IReadOnlyList<string> TypeParameters { get; init; } = [];
 }
 
 // === Statements ===
@@ -304,6 +320,7 @@ public sealed partial record BoundCompoundAssignment(BoundExpression Target, Syn
     /// AssignmentLowering consumes this semantic fact before ordinary compound
     /// assignment lowering can turn it into invalid delegate arithmetic.
     public bool IsEventSubscription { get; init; }
+    public BoundBinaryExpression? Combined { get; init; }
 }
 
 // === Expressions ===
@@ -339,8 +356,20 @@ public sealed partial record BoundNameExpression(string Name, BoundType Type) : 
     /// flattened namespace paths, external-only references).
     public Esharp.Symbols.ISymbol? Symbol { get; init; }
 }
-public sealed partial record BoundUnaryExpression(SyntaxTokenKind Op, BoundExpression Operand, BoundType Type) : BoundExpression(Type);
-public sealed partial record BoundBinaryExpression(BoundExpression Left, SyntaxTokenKind Op, BoundExpression Right, BoundType Type) : BoundExpression(Type);
+public sealed partial record BoundUnaryExpression(SyntaxTokenKind Op, BoundExpression Operand, BoundType Type) : BoundExpression(Type)
+{
+    public Esharp.Symbols.MethodSymbol? ResolvedOperator { get; init; }
+    public System.Reflection.MethodInfo? ExternalOperator { get; init; }
+    public ICSharpMemberHandle? ExternalCSharpOperator { get; init; }
+    public ExternalCSharpType? ExternalCSharpOperatorOwner { get; init; }
+}
+public sealed partial record BoundBinaryExpression(BoundExpression Left, SyntaxTokenKind Op, BoundExpression Right, BoundType Type) : BoundExpression(Type)
+{
+    public Esharp.Symbols.MethodSymbol? ResolvedOperator { get; init; }
+    public System.Reflection.MethodInfo? ExternalOperator { get; init; }
+    public ICSharpMemberHandle? ExternalCSharpOperator { get; init; }
+    public ExternalCSharpType? ExternalCSharpOperatorOwner { get; init; }
+}
 public sealed partial record BoundMemberAccessExpression(BoundExpression Target, string MemberName, BoundType Type) : BoundExpression(Type)
 {
     /// This member is the value projection of a raised durable property location.
@@ -388,6 +417,10 @@ public sealed partial record BoundObjectCreationExpression(BoundType ObjectType,
 }
 public sealed partial record BoundIndexExpression(BoundExpression Target, BoundExpression Index, BoundType Type) : BoundExpression(Type);
 public sealed partial record BoundArrayCreationExpression(BoundType ElementType, BoundExpression Size, BoundType Type) : BoundExpression(Type);
+
+// `stackalloc T[](n)` — a frame-local buffer. `Type` is the resulting `Span<T>` /
+// `ReadOnlySpan<T>`; codegen lowers to `sizeof(T) * n` → `localloc` → `new Span<T>(void*, int)`.
+public sealed partial record BoundStackAllocExpression(BoundType ElementType, BoundExpression Size, BoundType Type) : BoundExpression(Type);
 
 // (e1, e2, ...) — tuple literal  [CORE]
 public sealed partial record BoundTupleLiteralExpression(IReadOnlyList<BoundExpression> Elements, BoundType Type) : BoundExpression(Type);
@@ -513,7 +546,12 @@ public sealed partial record BoundField(
     bool PropHasMut = false,
     bool PropMutWritable = false,
     bool PropHasCustomSetter = false,
-    BoundScopedMutAccessor? ScopedMut = null)
+    BoundScopedMutAccessor? ScopedMut = null,
+    // Per-accessor visibility (`pub var X { priv set }`). Null inherits `Vis`; a set
+    // value narrows that one accessor's emitted `get_`/`set_` method (ES2229 rejects
+    // widening).
+    Esharp.Syntax.Visibility? GetterVis = null,
+    Esharp.Syntax.Visibility? SetterVis = null)
 {
     // Three-state field visibility: `pub` → Public, `priv` → Private, bare → internal.
     // `IsPublic` stays the public-vs-not face; `Vis` distinguishes `priv` (CLR private)

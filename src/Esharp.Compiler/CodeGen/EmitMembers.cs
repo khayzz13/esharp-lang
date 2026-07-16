@@ -49,9 +49,19 @@ public partial class MethodBodyEmitter
             if (getter is not null)
             {
                 var getterRef = _types.Module.ImportReference(getter);
-                EmitExpression(idx.Target);
+                if (getter.DeclaringType!.IsValueType) EmitAddress(idx.Target);
+                else EmitExpression(idx.Target);
                 EmitIndexValue(idx.Index, runtimeType, isArray: false);
                 { if (getter.DeclaringType!.IsValueType) _il.Call(getterRef); else _il.CallVirt(getterRef); }
+
+                // Span<T>/ReadOnlySpan<T> indexers return ref T / ref readonly T.
+                // Source indexing reads T, so consume the managed pointer immediately;
+                // no byref is ever stored in a local or allowed to escape this expression.
+                if (getter.ReturnType.IsByRef)
+                {
+                    var element = getter.ReturnType.GetElementType()!;
+                    _il.LoadObject(_types.Module.ImportReference(element));
+                }
 
                 _lastCallWasVoid = false;
                 return;
@@ -172,6 +182,265 @@ public partial class MethodBodyEmitter
         _il.Sub();
     }
 
+    // `stackalloc T[](n)` → a frame-local `Span<T>` / `ReadOnlySpan<T>`. Lowers to
+    // `sizeof(T) * n` → `localloc` (a stack buffer) → `new Span<T>(void*, int)`. The
+    // count is spilled to a temp so it feeds both the byte-size product and the span
+    // length without re-evaluating a side-effecting size expression.
+    void EmitStackAlloc(BoundStackAllocExpression sa)
+    {
+        var module = _types.Module;
+        var elemRef = _types.Resolve(sa.ElementType);
+        var isReadOnly = sa.Type is ExternalType { Name: "ReadOnlySpan" };
+        var openSpan = isReadOnly ? typeof(System.ReadOnlySpan<>) : typeof(System.Span<>);
+        var openCtor = openSpan.GetConstructors().First(c =>
+        {
+            var ps = c.GetParameters();
+            return ps.Length == 2 && ps[0].ParameterType.IsPointer && ps[1].ParameterType == typeof(int);
+        });
+        var closedSpan = new Mono.Cecil.GenericInstanceType(module.ImportReference(openSpan));
+        closedSpan.GenericArguments.Add(elemRef);
+        var ctor = RebindToDeclaring(module.ImportReference(openCtor), closedSpan);
+
+        var countLocal = new VariableDefinition(module.TypeSystem.Int32);
+        _method.Body.Variables.Add(countLocal);
+        EmitExpression(sa.Size);
+        _il.StoreLocal(countLocal);
+
+        // pointer = localloc(count * sizeof(T)) — stack empty but for the byte count.
+        _il.LoadLocal(countLocal);
+        _il.Sizeof(elemRef);
+        _il.Mul();
+        _il.Localloc();
+
+        // new Span<T>(void* pointer, int length)
+        _il.LoadLocal(countLocal);
+        _il.NewObj(ctor);
+        _lastCallWasVoid = false;
+    }
+
+    // Emit the CLR's implicit span operator for an operand already on the stack:
+    //   T[]      → Span<T> / ReadOnlySpan<T>   (op_Implicit taking an array)
+    //   Span<T>  → ReadOnlySpan<T>             (op_Implicit taking Span<T>)
+    // `target` is the destination span BoundType; `source` picks which op_Implicit
+    // overload (array vs Span<T> parameter). Resolves op_Implicit on the OPEN span
+    // definition, then rebinds it to the closed target so the CLR substitutes the
+    // element — the same mechanism EmitStackAlloc uses for the span ctor.
+    void EmitSpanImplicit(BoundType source, BoundType target)
+    {
+        var module = _types.Module;
+        var targetExt = (ExternalType)target;
+        var elemRef = _types.Resolve(targetExt.TypeArguments![0]);
+
+        // Which type DEFINES op_Implicit, and which parameter shape:
+        //   T[]      → span : `op_Implicit(T[])`      lives on the TARGET span type.
+        //   Span<T>  → ROS  : `op_Implicit(Span<T>)`  lives on `Span<T>` (the SOURCE).
+        System.Type declaringDef;
+        System.Func<System.Reflection.ParameterInfo, bool> paramMatch;
+        if (source is ArrayBoundType)
+        {
+            declaringDef = targetExt.Name == "ReadOnlySpan"
+                ? typeof(System.ReadOnlySpan<>) : typeof(System.Span<>);
+            paramMatch = p => p.ParameterType.IsArray;
+        }
+        else
+        {
+            declaringDef = typeof(System.Span<>);
+            paramMatch = p => p.ParameterType.IsGenericType
+                && p.ParameterType.GetGenericTypeDefinition() == typeof(System.Span<>);
+        }
+
+        var openOp = declaringDef.GetMethods().First(m =>
+            m.Name == "op_Implicit" && m.GetParameters() is { Length: 1 } ps && paramMatch(ps[0]));
+
+        // The defining type closed on the (invariant) element — the target's element,
+        // which equals the source's for the Span → ReadOnlySpan case.
+        var closedDeclaring = new Mono.Cecil.GenericInstanceType(module.ImportReference(declaringDef));
+        closedDeclaring.GenericArguments.Add(elemRef);
+        _il.Call(RebindToDeclaring(module.ImportReference(openOp), closedDeclaring));
+        _lastCallWasVoid = false;
+    }
+
+    // Call-site span coercion: an array or `Span<T>` argument flowing into a
+    // `Span<T>` / `ReadOnlySpan<T>` parameter. The operand is already emitted; this
+    // appends the framework op_Implicit when (and only when) the param is a span whose
+    // element matches the argument's (spans are invariant). Returns true when it fired.
+    bool TryEmitSpanArg(BoundExpression arg, TypeReference paramType)
+    {
+        if (paramType is not Mono.Cecil.GenericInstanceType git
+            || git.ElementType.Namespace != "System")
+            return false;
+        var isReadOnly = git.ElementType.Name == "ReadOnlySpan`1";
+        if (!isReadOnly && git.ElementType.Name != "Span`1") return false;
+
+        BoundType? elem = arg.Type switch
+        {
+            ArrayBoundType a => a.ElementType,
+            ExternalType { Name: "Span", TypeArguments: { Count: 1 } sa } when isReadOnly => sa[0],
+            _ => null,
+        };
+        if (elem is null) return false;
+        // Spans are invariant: the argument's element must equal the parameter's — unless
+        // the parameter's element is still an OPEN generic parameter (a generic extension
+        // like `SequenceEqual<T>(this ReadOnlySpan<T>, ReadOnlySpan<T>)`, whose `T` is
+        // inferred from the arg). Then the arg's element IS `T`, so the conversion target
+        // is `ReadOnlySpan<arg-element>` and the closed call site agrees.
+        var paramElem = git.GenericArguments[0];
+        if (paramElem is not GenericParameter && _types.Resolve(elem).FullName != paramElem.FullName)
+            return false;
+
+        EmitSpanImplicit(arg.Type, new ExternalType(isReadOnly ? "ReadOnlySpan" : "Span", new[] { elem }));
+        return true;
+    }
+
+    // A range-slice read: `target[a..b]`, either endpoint optional and `^k`
+    // (index-from-end) allowed. Builds a System.Range and calls the target's slice
+    // op — RuntimeHelpers.GetSubArray<T> for an array, the `[Range]` indexer or
+    // Slice(Range) for a Span/ReadOnlySpan/string.
+    void EmitRangeSlice(BoundRangeExpression slice)
+    {
+        var target = slice.Target!;
+        var module = _types.Module;
+
+        if (target.Type is ArrayBoundType arr)
+        {
+            var elemRef = _types.Resolve(arr.ElementType);
+            EmitExpression(target);
+            EmitRangeValue(slice);
+            var getSub = module.ImportReference(
+                typeof(System.Runtime.CompilerServices.RuntimeHelpers).GetMethod("GetSubArray")!);
+            var closed = new Mono.Cecil.GenericInstanceMethod(getSub);
+            closed.GenericArguments.Add(elemRef);
+            _il.Call(closed);
+            _lastCallWasVoid = false;
+            return;
+        }
+
+        var runtime = _types.BoundTypeToRuntime(target.Type);
+        var slicer = runtime is null ? null : ResolveRangeSlicer(runtime);
+        if (slicer is not null)
+        {
+            var methodRef = module.ImportReference(slicer);
+            if (slicer.DeclaringType!.IsValueType) EmitAddress(target); else EmitExpression(target);
+            EmitRangeValue(slice);
+            if (slicer.DeclaringType!.IsValueType) _il.Call(methodRef); else _il.CallVirt(methodRef);
+            _lastCallWasVoid = false;
+            return;
+        }
+
+        // Span/ReadOnlySpan (and any span-like value type) have no `this[Range]`; they
+        // carry `Slice(int start, int length)` + a `Length` property. Lower the range to
+        // an absolute (start, length) pair against the receiver's own length — the same
+        // shape C# emits for `span[a..b]`.
+        if (runtime is not null
+            && runtime.GetProperty("Length", Type.EmptyTypes)?.GetMethod is { } lengthGetter
+            && runtime.GetMethod("Slice", new[] { typeof(int), typeof(int) }) is { } lengthSlice)
+        {
+            EmitLengthRelativeSlice(slice, runtime, lengthGetter, lengthSlice);
+            return;
+        }
+
+        _diagnostics.Report("", 0, 0, $"IL: unresolved range slice on type '{target.Type}'");
+        EmitExpression(target);
+    }
+
+    // The `this[Range]` indexer (string, `List<T>` via extension) or a public `Slice(Range)`.
+    static System.Reflection.MethodInfo? ResolveRangeSlicer(Type t) =>
+        t.GetProperty("Item", new[] { typeof(System.Range) })?.GetMethod
+        ?? t.GetMethod("Slice", new[] { typeof(System.Range) });
+
+    // `target[a..b]` on a span-like value type: spill the receiver to a temp (its
+    // methods need a managed address), resolve each endpoint to an absolute int against
+    // `target.Length`, then `ldloca tmp; start; length; call Slice(int,int)`.
+    void EmitLengthRelativeSlice(BoundRangeExpression slice, Type runtime,
+        System.Reflection.MethodInfo lengthGetter, System.Reflection.MethodInfo lengthSlice)
+    {
+        var module = _types.Module;
+        var getLength = module.ImportReference(lengthGetter);
+        var sliceMethod = module.ImportReference(lengthSlice);
+        var int32 = module.TypeSystem.Int32;
+
+        var recv = new VariableDefinition(_types.Resolve(slice.Target!.Type));
+        var startLoc = new VariableDefinition(int32);
+        var lenLoc = new VariableDefinition(int32);
+        _method.Body.Variables.Add(recv);
+        _method.Body.Variables.Add(startLoc);
+        _method.Body.Variables.Add(lenLoc);
+
+        EmitExpression(slice.Target);
+        _il.StoreLocal(recv);
+
+        EmitLengthRelativeEndpoint(slice.Start, atEnd: false, recv, getLength);
+        _il.StoreLocal(startLoc);
+        EmitLengthRelativeEndpoint(slice.End, atEnd: true, recv, getLength);
+        _il.LoadLocal(startLoc);
+        _il.Sub();                       // length = end - start
+        _il.StoreLocal(lenLoc);
+
+        _il.LoadLocalAddress(recv);
+        _il.LoadLocal(startLoc);
+        _il.LoadLocal(lenLoc);
+        _il.Call(sliceMethod);
+        _lastCallWasVoid = false;
+    }
+
+    // One endpoint of a length-relative slice as an absolute int32. A null endpoint is
+    // 0 (start) or `recv.Length` (end); `^k` is `recv.Length - k`; a plain `k` is itself.
+    void EmitLengthRelativeEndpoint(BoundExpression? endpoint, bool atEnd,
+        VariableDefinition recv, MethodReference getLength)
+    {
+        if (endpoint is null)
+        {
+            if (atEnd) { _il.LoadLocalAddress(recv); _il.Call(getLength); }
+            else _il.LoadInt(0);
+            return;
+        }
+        if (endpoint is BoundUnaryExpression { Op: SyntaxTokenKind.Caret } fromEnd)
+        {
+            _il.LoadLocalAddress(recv);
+            _il.Call(getLength);
+            EmitExpression(fromEnd.Operand);
+            _il.Sub();
+            return;
+        }
+        EmitExpression(endpoint);
+    }
+
+    // Push a System.Range built from the slice's endpoints. A null endpoint is
+    // Index.Start / Index.End; `^k` is Index(k, fromEnd: true); a plain `k` is
+    // Index(k, fromEnd: false).
+    void EmitRangeValue(BoundRangeExpression slice)
+    {
+        var module = _types.Module;
+        var indexCtor = module.ImportReference(typeof(System.Index).GetConstructor(new[] { typeof(int), typeof(bool) })!);
+        var startProp = module.ImportReference(typeof(System.Index).GetProperty("Start")!.GetMethod!);
+        var endProp = module.ImportReference(typeof(System.Index).GetProperty("End")!.GetMethod!);
+        var rangeCtor = module.ImportReference(typeof(System.Range).GetConstructor(new[] { typeof(System.Index), typeof(System.Index) })!);
+
+        EmitIndexEndpoint(slice.Start, atEnd: false, indexCtor, startProp, endProp);
+        EmitIndexEndpoint(slice.End, atEnd: true, indexCtor, startProp, endProp);
+        _il.NewObj(rangeCtor);
+    }
+
+    void EmitIndexEndpoint(BoundExpression? endpoint, bool atEnd,
+        MethodReference indexCtor, MethodReference startProp, MethodReference endProp)
+    {
+        if (endpoint is null)
+        {
+            _il.Call(atEnd ? endProp : startProp);   // Index.End / Index.Start
+            return;
+        }
+        if (endpoint is BoundUnaryExpression { Op: SyntaxTokenKind.Caret } fromEnd)
+        {
+            EmitExpression(fromEnd.Operand);
+            _il.LoadInt(1);                          // fromEnd: true
+            _il.NewObj(indexCtor);
+            return;
+        }
+        EmitExpression(endpoint);
+        _il.LoadInt(0);                              // fromEnd: false
+        _il.NewObj(indexCtor);
+    }
+
     void EmitIndexAssignment(BoundIndexExpression idx, BoundExpression value)
     {
         // `T[]` element write — `stelem`. Element type from the Cecil resolve so a
@@ -215,6 +484,22 @@ public partial class MethodBodyEmitter
                 EmitExpression(value);
                 { if (setter.DeclaringType!.IsValueType) _il.Call(setterRef); else _il.CallVirt(setterRef); }
 
+                return;
+            }
+
+
+            // Span<T> exposes a ref-returning getter instead of a set_Item method.
+            // Assigning through the indexer writes to the location returned by get_Item.
+            var getter = ResolveIndexerGetter(runtimeType);
+            if (getter is { ReturnType.IsByRef: true })
+            {
+                var getterRef = _types.Module.ImportReference(getter);
+                if (getter.DeclaringType!.IsValueType) EmitAddress(idx.Target);
+                else EmitExpression(idx.Target);
+                EmitIndexValue(idx.Index, runtimeType, isArray: false);
+                { if (getter.DeclaringType!.IsValueType) _il.Call(getterRef); else _il.CallVirt(getterRef); }
+                EmitExpression(value);
+                _il.StoreObject(_types.Module.ImportReference(getter.ReturnType.GetElementType()!));
                 return;
             }
         }
@@ -557,7 +842,11 @@ public partial class MethodBodyEmitter
         }
         if (getter is null) return false;
 
-        Mono.Cecil.MethodReference getterRef = getter;
+        // A getter resolved on a BCL base class (`Exception::get_Message` when an E# class
+        // extends `Exception`) lives in another module and must be imported before it can
+        // be referenced in a call; a getter on a module-local base is used as-is.
+        Mono.Cecil.MethodReference getterRef =
+            ReferenceEquals(getter.Module, _types.Module) ? getter : _types.Module.ImportReference(getter);
         if (_types.Resolve(ma.Target.Type) is GenericInstanceType git)
             getterRef = HostMethodOnType(getter, git);
         else if (owner.HasGenericParameters && ReferenceEquals(owner, _method.DeclaringType))

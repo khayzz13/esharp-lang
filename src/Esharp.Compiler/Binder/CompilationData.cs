@@ -47,6 +47,10 @@ public sealed record CompilationData
     // binder and IL emitter agree on what resolves. Default true.
     public bool EnableImplicitUsings { get; init; } = true;
 
+    /// Emit opt-in performance diagnostics for source constructs that copy values,
+    /// box, or require runtime allocation. These warnings never change lowering.
+    public bool ShowAllocations { get; init; }
+
     /// The member-emission seam (null by default — batch compilation synthesizes
     /// nothing). When set, the binder invokes it per `data` declaration between the
     /// promotion sort and BindData, so synthesized members satisfy interfaces and

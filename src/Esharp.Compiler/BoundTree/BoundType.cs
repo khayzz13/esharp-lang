@@ -74,6 +74,12 @@ public sealed record EnumType(string Name, EnumDeclarationSyntax Decl) : BoundTy
     /// registration; `with`-clones (closed generics) inherit it.
     public TypeSymbol? Symbol { get; init; }
 
+    /// The enum's underlying integral primitive (`enum C: byte` → `"byte"`), defaulting
+    /// to `int`. This is the type a case value carries at the CLR level, so a native
+    /// numeric conversion out of the enum (`byte(codec)`) treats the enum as this type.
+    public string UnderlyingPrimitiveName =>
+        (Decl.UnderlyingType as Esharp.Syntax.NamedTypeSyntax)?.Name ?? "int";
+
     public override string EmitName => Name;
 }
 
@@ -198,7 +204,19 @@ public sealed record StaticFuncType(
 
 public sealed record TupleType(IReadOnlyList<BoundType> ElementTypes) : BoundType
 {
+    /// Per-element labels (`(name: T, other: U)`), aligned by position with
+    /// `ElementTypes`; a null entry is an unlabeled element. Names are metadata — a
+    /// labeled tuple is the same underlying `ValueTuple<…>` as its unlabeled twin — so
+    /// they are deliberately excluded from type equality below.
+    public IReadOnlyList<string?>? ElementNames { get; init; }
+
     public override string EmitName => $"({string.Join(", ", ElementTypes.Select(t => t.EmitName))})";
+
+    public bool Equals(TupleType? other) =>
+        other is not null && EqualityComparer<IReadOnlyList<BoundType>>.Default.Equals(ElementTypes, other.ElementTypes);
+
+    public override int GetHashCode() =>
+        EqualityComparer<IReadOnlyList<BoundType>>.Default.GetHashCode(ElementTypes);
 }
 
 public sealed record ByRefBoundType(BoundType Inner) : BoundType

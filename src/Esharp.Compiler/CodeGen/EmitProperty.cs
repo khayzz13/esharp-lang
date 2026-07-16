@@ -164,7 +164,7 @@ public static partial class CodeGenerator
     // `set_<name>` name is in the type's interface method map — mark it `virtual newslot`
     // and add the MethodImpl override(s), the same wiring the instance-method pass does for
     // a method that implements an interface method (ILEmitter.cs). Without this a stored
-    // property or a field would carry the InterfaceImplementation but leave the slot empty,
+    // property would carry the InterfaceImplementation but leave the slot empty,
     // and the CLR would reject the type at load.
     static void WireInterfaceAccessor(MethodDefinition accessor, IReadOnlyDictionary<string, List<MethodReference>> ifaceMethodsByName)
     {
@@ -213,17 +213,7 @@ public static partial class CodeGenerator
                 EmitPropertyCapability(module, declared, field);
                 continue;
             }
-            if (!field.IsProperty)
-            {
-                // Field-satisfies-property: a plain field conforms to an interface property
-                // requirement through synthesized accessors (no `{ }` on the implementer).
-                // The interface slot names drive it — `get_<name>` / `set_<name>` present in
-                // the map means this field fills that property contract. The field stays a
-                // real field; the accessors forward to it (no separate PropertyDefinition, so
-                // there is no field/property name clash in the metadata).
-                EmitFieldSatisfiesProperty(typeDef, field, ifaceMethodsByName);
-                continue;
-            }
+            if (!field.IsProperty) continue;
 
             MethodDefinition getter;
             MethodDefinition? setter = null;
@@ -238,6 +228,20 @@ public static partial class CodeGenerator
                 existing.IsHideBySig = true;
                 SetAccess(existing, AccessFor(field));
                 getter = existing;
+                if (field.PropHasCustomSetter)
+                {
+                    var custom = typeDef.Methods.FirstOrDefault(m =>
+                        m.Name == "set_" + field.Name && !m.IsStatic && m.Parameters.Count == 1);
+                    if (custom is not null)
+                    {
+                        custom.IsSpecialName = true;
+                        custom.IsHideBySig = true;
+                        SetAccess(custom, AccessFor(field));
+                        setter = custom;
+                        WireInterfaceAccessor(custom, ifaceMethodsByName);
+                    }
+                }
+                WireInterfaceAccessor(getter, ifaceMethodsByName);
             }
             else
             {
@@ -303,69 +307,4 @@ public static partial class CodeGenerator
         }
     }
 
-    // A plain field satisfying an interface property requirement gets forwarding `get_`/
-    // `set_` accessor methods synthesized over it and wired into the interface slot. The
-    // setter's return type is copied from the interface slot so an init-only requirement
-    // (modreq IsExternalInit) is matched exactly. No PropertyDefinition is emitted — the
-    // field already owns the name, so a property of the same name would clash; the accessor
-    // methods alone fill the interface contract.
-    static void EmitFieldSatisfiesProperty(TypeDefinition typeDef, BoundField field,
-        IReadOnlyDictionary<string, List<MethodReference>> ifaceMethodsByName)
-    {
-        var getName = "get_" + field.Name;
-        var setName = "set_" + field.Name;
-        var locaName = "getloca_" + field.Name;
-        var wantsGet = ifaceMethodsByName.ContainsKey(getName);
-        var wantsSet = ifaceMethodsByName.ContainsKey(setName);
-        var wantsLoca = ifaceMethodsByName.ContainsKey(locaName);
-        if (!wantsGet && !wantsSet && !wantsLoca) return;
-
-        var clrField = typeDef.Fields.FirstOrDefault(f => f.Name == field.Name);
-        if (clrField is null) return;
-
-        const MethodAttributes accessorAttrs = MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName;
-
-        if (wantsGet)
-        {
-            var getter = new MethodDefinition(getName, accessorAttrs, clrField.FieldType);
-            getter.Body.InitLocals = true;
-            var gil = new ILBuilder(getter);
-            gil.LoadArgByIndex(0);
-            gil.LoadField(clrField);
-            gil.Return();
-            typeDef.Methods.Add(getter);
-            WireInterfaceAccessor(getter, ifaceMethodsByName);
-        }
-
-        if (wantsSet)
-        {
-            // Match the slot's return type so an init-only setter's modreq(IsExternalInit)
-            // is reproduced; a plain `{ get set }` slot returns void.
-            var slotReturn = ifaceMethodsByName[setName][0].ReturnType;
-            var setter = new MethodDefinition(setName, accessorAttrs, slotReturn);
-            setter.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, clrField.FieldType));
-            setter.Body.InitLocals = true;
-            var sil = new ILBuilder(setter);
-            sil.LoadArgByIndex(0);
-            sil.LoadArgByIndex(1);
-            sil.StoreField(clrField);
-            sil.Return();
-            typeDef.Methods.Add(setter);
-            WireInterfaceAccessor(setter, ifaceMethodsByName);
-        }
-
-
-        if (wantsLoca)
-        {
-            var location = new MethodDefinition(locaName, accessorAttrs,
-                new ByReferenceType(clrField.FieldType));
-            location.Body.InitLocals = true;
-            var lil = new ILBuilder(location);
-            lil.LoadArgByIndex(0);
-            lil.LoadFieldAddress(clrField);
-            lil.Return();
-            typeDef.Methods.Add(location);
-            WireInterfaceAccessor(location, ifaceMethodsByName);
-        }
-    }
 }

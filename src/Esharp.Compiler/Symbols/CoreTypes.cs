@@ -20,7 +20,7 @@ public sealed class CoreTypes
     static readonly string[] PrimitiveNames =
     {
         "int", "long", "short", "byte", "sbyte",
-        "uint", "ulong", "ushort",
+        "uint", "ulong", "ushort", "nint", "nuint",
         "float", "double", "decimal",
         "bool", "char", "string", "object",
     };

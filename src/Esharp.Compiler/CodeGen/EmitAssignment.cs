@@ -197,7 +197,7 @@ public partial class MethodBodyEmitter
                 // Unresolved — emit for side effects and drop the result.
                 EmitExpression(ca.Target);
                 EmitExpression(ca.Value);
-                EmitBinaryOp(ca.Op);
+                EmitBinaryOp(ca.Op, ca.Target.Type);
                 return;
             }
 
@@ -208,7 +208,7 @@ public partial class MethodBodyEmitter
             {
                 slot.EmitLoad(_il);
                 EmitExpression(ca.Value);
-                EmitBinaryOp(ca.Op);
+                EmitBinaryOp(ca.Op, ca.Target.Type);
             });
         }
         else if (ca.Target is BoundMemberAccessExpression ma)
@@ -219,7 +219,7 @@ public partial class MethodBodyEmitter
                 _il.Dup();
                 _il.LoadObject(_types.Resolve(ma.Type));
                 EmitExpression(ca.Value);
-                EmitBinaryOp(ca.Op);
+                EmitBinaryOp(ca.Op, ma.Type);
                 _il.StoreObject(_types.Resolve(ma.Type));
                 return;
             }
@@ -239,7 +239,7 @@ public partial class MethodBodyEmitter
                 {
                     _il.LoadStaticField(staticField);
                     EmitExpression(ca.Value);
-                    EmitBinaryOp(ca.Op);
+                    EmitBinaryOp(ca.Op, ca.Target.Type);
                     _il.StoreStaticField(staticField);
                     return;
                 }
@@ -310,7 +310,7 @@ public partial class MethodBodyEmitter
                 {
                     _il.LoadField(hpField);
                     EmitExpression(ca.Value);
-                    EmitBinaryOp(ca.Op);
+                    EmitBinaryOp(ca.Op, ma.Type);
                     _il.StoreField(hpField);
                 }
             }
@@ -331,7 +331,7 @@ public partial class MethodBodyEmitter
                 {
                     _il.LoadField(field);
                     EmitExpression(ca.Value);
-                    EmitBinaryOp(ca.Op);
+                    EmitBinaryOp(ca.Op, ma.Type);
                     _il.StoreField(field);
                 }
             }
@@ -387,7 +387,7 @@ public partial class MethodBodyEmitter
             _il.Dup();
             _il.Call(getterRef);
             EmitExpression(value);
-            EmitBinaryOp(op);
+            EmitBinaryOp(op, ma.Type);
             _il.Call(setterRef);
             return true;
         }
@@ -400,7 +400,7 @@ public partial class MethodBodyEmitter
             _il.Dup();
             _il.Call(getterRef);
             EmitExpression(value);
-            EmitBinaryOp(op);
+            EmitBinaryOp(op, ma.Type);
             _il.Call(setterRef);
             return true;
         }
@@ -416,7 +416,7 @@ public partial class MethodBodyEmitter
         _il.LoadLocal(receiver);
         _il.CallVirt(getterRef);
         EmitExpression(value);
-        EmitBinaryOp(op);
+        EmitBinaryOp(op, ma.Type);
         _il.StoreLocal(result);
         _il.LoadLocal(receiver);
         _il.LoadLocal(result);

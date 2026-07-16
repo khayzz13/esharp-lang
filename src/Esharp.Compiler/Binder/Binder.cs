@@ -68,6 +68,7 @@ public sealed class Binder
     {
         RegisterTypes(syntax);
         RegisterSignatures(syntax);
+        FinalizeOperatorDeclarations();
         RegisterNamespaceStates(syntax);
         // The convenience path still represents a one-file compilation, so it
         // performs the same post-bind pointer realization as CompilationPipeline.
@@ -76,6 +77,71 @@ public sealed class Binder
         // callee as `__Ptr_T`.
         return PointerEscapeAnalysis.Run([BindUnit(syntax)], _data.Diagnostics)[0];
     }
+
+    public void FinalizeOperatorDeclarations()
+    {
+        foreach (var owner in _data.Symbols.AllOfKind(TypeSymbolKind.Struct, TypeSymbolKind.Class))
+        {
+            var operators = owner.Members.Where(m => m.OperatorKind is not null).ToList();
+            if (operators.Count == 0) continue;
+            static string Signature(MethodSymbol m) => string.Join("|", m.OperatorParameterTypes.Select(BoundTypeDisplay.Name));
+
+            foreach (var duplicate in operators.GroupBy(m => (m.OperatorKind, Sig: Signature(m))).Where(g => g.Count() > 1))
+                foreach (var method in duplicate.Skip(1))
+                    _data.Diagnostics.Report(method.Decl?.NameSpan ?? owner.Span,
+                        $"ES2278: duplicate operator '{method.Name}' with operand signature ({string.Join(", ", method.OperatorParameterTypes.Select(BoundTypeDisplay.Name))}).");
+
+            foreach (var method in operators)
+            {
+                var pair = method.OperatorKind switch
+                {
+                    SyntaxTokenKind.EqualsEquals => SyntaxTokenKind.BangEquals,
+                    SyntaxTokenKind.BangEquals => SyntaxTokenKind.EqualsEquals,
+                    SyntaxTokenKind.Less => SyntaxTokenKind.Greater,
+                    SyntaxTokenKind.Greater => SyntaxTokenKind.Less,
+                    SyntaxTokenKind.LessEquals => SyntaxTokenKind.GreaterEquals,
+                    SyntaxTokenKind.GreaterEquals => SyntaxTokenKind.LessEquals,
+                    _ => (SyntaxTokenKind?)null,
+                };
+                if (pair is not null && !operators.Any(candidate => candidate.OperatorKind == pair && Signature(candidate) == Signature(method)))
+                    _data.Diagnostics.Report(method.Decl?.NameSpan ?? owner.Span,
+                        $"ES2279: operator '{method.Name}' requires its matching '{OperatorGlyph(pair.Value)}' declaration with the same operand types.");
+            }
+
+            if (owner.Decl is DataDeclarationSyntax { DeriveTraits: { } traits }
+                && traits.Contains("equality", StringComparer.Ordinal)
+                && operators.Any(m => m.OperatorKind is SyntaxTokenKind.EqualsEquals or SyntaxTokenKind.BangEquals))
+                _data.Diagnostics.Report(owner.Span,
+                    "ES2280: 'derive equality' conflicts with explicit ==/!= operator functions; choose one equality definition.");
+        }
+    }
+
+    // The integral primitive names a CLR enum may be backed by. `int` is the default.
+    static readonly HashSet<string> EnumUnderlyingPrimitives =
+        new() { "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong" };
+
+    // The primitive name for `enum C: T { … }`, defaulting to `int`. A non-integral or
+    // otherwise unrecognized annotation is reported and falls back to `int`.
+    string ResolveEnumUnderlying(EnumDeclarationSyntax decl)
+    {
+        if (decl.UnderlyingType is null) return "int";
+        if (decl.UnderlyingType is NamedTypeSyntax { Name: var name } && EnumUnderlyingPrimitives.Contains(name))
+            return name;
+        _data.Diagnostics.Report(decl.NameSpan, DiagnosticDescriptors.EnumUnderlyingTypeInvalid,
+            decl.Name, (decl.UnderlyingType as NamedTypeSyntax)?.Name ?? decl.UnderlyingType.ToString());
+        return "int";
+    }
+
+    internal static string OperatorGlyph(SyntaxTokenKind op) => op switch
+    {
+        SyntaxTokenKind.Plus => "+", SyntaxTokenKind.Minus => "-", SyntaxTokenKind.Bang => "!", SyntaxTokenKind.Tilde => "~",
+        SyntaxTokenKind.Star => "*", SyntaxTokenKind.Slash => "/", SyntaxTokenKind.Percent => "%",
+        SyntaxTokenKind.Ampersand => "&", SyntaxTokenKind.Pipe => "|", SyntaxTokenKind.Caret => "^",
+        SyntaxTokenKind.ShiftLeft => "<<", SyntaxTokenKind.ShiftRight => ">>", SyntaxTokenKind.UnsignedShiftRight => ">>>",
+        SyntaxTokenKind.EqualsEquals => "==", SyntaxTokenKind.BangEquals => "!=",
+        SyntaxTokenKind.Less => "<", SyntaxTokenKind.LessEquals => "<=", SyntaxTokenKind.Greater => ">", SyntaxTokenKind.GreaterEquals => ">=",
+        _ => op.ToString(),
+    };
 
     /// Register namespace-host let/var state after all call signatures exist but
     /// before any body binds. This is the namespace analogue of signature binding:
@@ -313,7 +379,7 @@ public sealed class Binder
                         resolvedCases.Add(new BoundEnumCase(c.Name, value));
                         nextEnumValue = value + 1;
                     }
-                    output.Add(new BoundEnumDeclaration(enumDecl.IsPublic, enumDecl.Name, resolvedCases, parentKey) { Visibility = enumDecl.Visibility });
+                    output.Add(new BoundEnumDeclaration(enumDecl.IsPublic, enumDecl.Name, resolvedCases, parentKey, ResolveEnumUnderlying(enumDecl)) { Visibility = enumDecl.Visibility });
                     break;
                 case InterfaceDeclarationSyntax proto:
                     output.Add(Declarations.BindProtocol(proto) with { DeclaringTypeKey = parentKey, Visibility = proto.Visibility });
@@ -372,12 +438,65 @@ public sealed class Binder
     /// every type is registered, so the receiver test sees a complete DataDecls.
     void CheckFunctionNameCasing(FunctionDeclarationSyntax fn)
     {
+        if (fn.OperatorKind is not null) return;
         if (fn.Name.Length == 0 || !char.IsUpper(fn.Name[0])) return;
         if (HasDataReceiver(fn)) return; // method: name may match an interface member
         _data.Diagnostics.Report(fn.Span,
             $"ES2161: function name '{fn.Name}' must be camelCase (start with a lower-case letter) — " +
             $"Pascal-case names are reserved for types, so a bare `{fn.Name}` would read as a type. " +
             $"(Methods with a receiver are exempt — they may match a .NET interface member.)");
+    }
+
+    void ValidateOperatorDeclaration(FunctionDeclarationSyntax fn, TypeSymbol? owner, int operandOffset)
+    {
+        if (fn.OperatorKind is not { } op) return;
+        var operands = fn.Parameters.Skip(operandOffset).ToList();
+        if (owner is null || !owner.HasStaticFacet
+            || owner.TypeKind is not (TypeSymbolKind.Struct or TypeSymbolKind.Class))
+            _data.Diagnostics.Report(fn.NameSpan,
+                $"ES2270: operator function '{fn.Name}' must belong to a companion static facet for an instance class or struct.");
+        if (fn.IsTypeBodyMethod || (fn.Receiver is not null && fn.Receiver.IsStaticFacet == false))
+            _data.Diagnostics.Report(fn.NameSpan,
+                $"ES2270: operator function '{fn.Name}' cannot be an instance method; place it in 'static T {{ ... }}' or attach it with a 'static T' receiver.");
+        if (fn.TypeParameters.Count != 0)
+            _data.Diagnostics.Report(fn.NameSpan, "ES2271: operator functions cannot declare method type parameters; use the owning type's parameters.");
+        if (fn.IsTaskFunc || DeclarationBinder.FunctionBodyHasAwait(fn) || DeclarationBinder.FunctionBodyHasYield(fn))
+            _data.Diagnostics.Report(fn.NameSpan, "ES2271: operator functions must be synchronous and cannot await or yield.");
+        if (!fn.HasExplicitReturnType || Types.ResolveHeapPointerAware(fn.ReturnType) is VoidType)
+            _data.Diagnostics.Report(fn.NameSpan, "ES2272: operator functions require an explicit non-void return type.");
+
+        var unaryOnly = op is SyntaxTokenKind.Bang or SyntaxTokenKind.Tilde;
+        var binaryOnly = op is not (SyntaxTokenKind.Plus or SyntaxTokenKind.Minus or SyntaxTokenKind.Bang or SyntaxTokenKind.Tilde);
+        var validArity = unaryOnly ? 1 : binaryOnly ? 2 : operands.Count is 1 or 2 ? operands.Count : -1;
+        if (validArity < 0 || operands.Count != validArity)
+            _data.Diagnostics.Report(fn.NameSpan,
+                $"ES2273: operator '{fn.Name}' requires {(unaryOnly ? "one" : binaryOnly ? "two" : "one or two")} explicit operand(s).");
+
+        foreach (var p in operands)
+            if (p.IsOut || p.DefaultValue is not null || p.Type is PointerTypeSyntax)
+                _data.Diagnostics.Report(p.NameSpan,
+                    "ES2274: operator operands cannot be out, by-reference, pointer, or optional parameters.");
+
+        if (owner is not null && operands.Count > 0)
+        {
+            var ownsOperand = operands.Select(p => Types.ResolveHeapPointerAware(p.Type)).Any(t => t switch
+            {
+                DataType d => ReferenceEquals(d.Symbol, owner) || (d.Name == owner.Name && d.TypeParameters.Count == owner.Arity),
+                _ => false,
+            });
+            if (!ownsOperand)
+                _data.Diagnostics.Report(fn.NameSpan,
+                    $"ES2275: at least one operand of '{fn.Name}' must have the owning type '{owner.Name}'.");
+        }
+
+        if (op is SyntaxTokenKind.ShiftLeft or SyntaxTokenKind.ShiftRight or SyntaxTokenKind.UnsignedShiftRight
+            && operands.Count == 2
+            && Types.ResolveHeapPointerAware(operands[1].Type) is not PrimitiveType { Name: "int" })
+            _data.Diagnostics.Report(operands[1].NameSpan, "ES2276: a shift operator's right operand must be int.");
+        if (op is SyntaxTokenKind.EqualsEquals or SyntaxTokenKind.BangEquals or
+            SyntaxTokenKind.Less or SyntaxTokenKind.LessEquals or SyntaxTokenKind.Greater or SyntaxTokenKind.GreaterEquals
+            && Types.ResolveHeapPointerAware(fn.ReturnType) is not PrimitiveType { Name: "bool" })
+            _data.Diagnostics.Report(fn.NameSpan, "ES2277: equality and ordering operators must return bool.");
     }
 
     /// True when a function's first parameter is a user `data` type (value or `*T`),
@@ -440,6 +559,8 @@ public sealed class Binder
                 case FunctionDeclarationSyntax func:
                     {
                         CheckFunctionNameCasing(func);
+                        if (func.OperatorKind is not null && func.Receiver?.IsStaticFacet != true)
+                            ValidateOperatorDeclaration(func, null, 0);
                         var effRet = func.ReturnType;
                         if (!func.HasExplicitReturnType && func.Parameters.Count > 0)
                         {
@@ -490,6 +611,8 @@ public sealed class Binder
                                 DeclaredParameters = func.Parameters.Select(p => MapTypeRef(Types.ResolveHeapPointerAware(p.Type))).ToList(),
                                 DeclaredReturn = MapTypeRef(callerReturn),
                                 TypeParameters = func.TypeParameters,
+                                OperatorKind = func.OperatorKind,
+                                OperatorParameterTypes = func.Parameters.Select(p => Types.ResolveHeapPointerAware(p.Type)).ToList(),
                             };
                             _data.Symbols.AddFunction(func.Name, freeSym);
                             host.AddMember(freeSym);
@@ -765,7 +888,7 @@ public sealed class Binder
                         resolvedCases.Add(new BoundEnumCase(c.Name, value));
                         nextEnumValue = value + 1;
                     }
-                    boundMembers.Add(new BoundEnumDeclaration(enumDecl.IsPublic, enumDecl.Name, resolvedCases));
+                    boundMembers.Add(new BoundEnumDeclaration(enumDecl.IsPublic, enumDecl.Name, resolvedCases, null, ResolveEnumUnderlying(enumDecl)));
                     break;
                 case StaticFuncDeclarationSyntax sfn:
                     var sfnSym = _data.Symbols.TryGet(sfn.Name, sfn.GenericParameters.Count, Ctx.CurrentNamespace);
@@ -1018,6 +1141,7 @@ public sealed class Binder
         try {
         foreach (var fn in sfn.Functions)
         {
+            ValidateOperatorDeclaration(fn, host, 0);
             // Members without an explicit return type pick up the static-func's
             // `returns Type` clause, if present.
             var effRet = fn.HasExplicitReturnType ? fn.ReturnType
@@ -1037,6 +1161,8 @@ public sealed class Binder
                 DeclaredParameters = fn.Parameters.Select(p => MapTypeRef(Types.ResolveHeapPointerAware(p.Type))).ToList(),
                 DeclaredReturn = MapTypeRef(sfnRet),
                 TypeParameters = fn.TypeParameters,
+                OperatorKind = fn.OperatorKind,
+                OperatorParameterTypes = fn.Parameters.Select(p => Types.ResolveHeapPointerAware(p.Type)).ToList(),
             };
             _data.Symbols.AddFunction($"{sfn.Name}.{fn.Name}", sfnSym);
             host?.AddMember(sfnSym);
@@ -1169,7 +1295,11 @@ public sealed class Binder
                 .Select(p => MapTypeRef(Types.ResolveHeapPointerAware(p.Type))).ToList(),
             DeclaredReturn = MapTypeRef(callerReturn),
             TypeParameters = func.TypeParameters,
+            OperatorKind = func.OperatorKind,
+            OperatorParameterTypes = (kind == ReceiverKind.Static ? func.Parameters.Skip(1) : func.Parameters)
+                .Select(p => Types.ResolveHeapPointerAware(p.Type)).ToList(),
         };
+        ValidateOperatorDeclaration(func, receiverSym, kind == ReceiverKind.Static ? 1 : 0);
         receiverSym.AddMember(method);
         if (kind == ReceiverKind.Static)
             _data.Symbols.AddFunction($"{receiverSym.Name}.{func.Name}", method);

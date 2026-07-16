@@ -159,6 +159,7 @@ internal static class RoslynSymbolAdapter
         {
             IMethodSymbol method when method.MethodKind is MethodKind.Ordinary
                                            or MethodKind.Constructor
+                                           or MethodKind.UserDefinedOperator
                                            or MethodKind.PropertyGet
                                            or MethodKind.PropertySet
                                 => new RoslynMethodHandle(method, _mapper),

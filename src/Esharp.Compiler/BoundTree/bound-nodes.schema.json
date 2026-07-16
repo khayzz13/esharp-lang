@@ -658,6 +658,18 @@
     },
 
     {
+      "name": "BoundStackAllocExpression",
+      "tier": "CORE",
+      "category": "Expression",
+      "base": "BoundExpression",
+      "fields": [
+        { "name": "ElementType", "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true },
+        { "name": "Size",        "type": "BoundExpression", "nullable": false, "child_kind": "expr", "update": true },
+        { "name": "Type",        "type": "BoundType",       "nullable": false, "child_kind": null,   "update": true }
+      ]
+    },
+
+    {
       "name": "BoundTupleLiteralExpression",
       "tier": "CORE",
       "category": "Expression",

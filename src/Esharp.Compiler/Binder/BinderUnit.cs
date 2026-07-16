@@ -68,6 +68,7 @@ internal abstract class BinderUnit
     protected Type? FindOpenGenericByName(string baseName, int arity) => B.Types.FindOpenGenericByName(baseName, arity);
     protected Type? ResolveBoundTypeToRuntime(BoundType t) => B.Types.ResolveBoundTypeToRuntime(t);
     protected bool IsNamespaceInScope(string ns) => B.Types.IsNamespaceInScope(ns);
+    protected bool IsByRefLike(BoundType type) => ResolveBoundTypeToRuntime(type)?.IsByRefLike == true;
 
     protected static BoundType MapRuntimeTypeToBoundType(Type t) => TypeResolver.MapRuntimeTypeToBoundType(t);
     protected static BoundType MapRuntimeWithSubstitution(Type t, IReadOnlyList<BoundType> args) => TypeResolver.MapRuntimeWithSubstitution(t, args);

@@ -72,6 +72,7 @@ public sealed class CompilationPipeline
             binder.RegisterTypes(unit);
         foreach (var unit in units)
             binder.RegisterSignatures(unit);
+        binder.FinalizeOperatorDeclarations();
         foreach (var unit in units)
             binder.RegisterNamespaceStates(unit);
 
@@ -83,7 +84,7 @@ public sealed class CompilationPipeline
         // detail.  Every callee is now visible before the fixed point chooses its
         // `ref T` fast path or durable `__Ptr_T` carrier, so callers in sibling
         // source files cannot manufacture a copied wrapper for an escaping callee.
-        var realized = PointerEscapeAnalysis.Run(bound, _data.Diagnostics);
+        var realized = PointerEscapeAnalysis.Run(bound, _data.Diagnostics, _data.ShowAllocations);
         return new BoundProgram(realized, _data);
     }
 

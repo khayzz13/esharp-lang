@@ -16,6 +16,20 @@ sealed class LiteralScanner : LexUnit
         var line = Cursor.Line;
         var col = Cursor.Column;
 
+        // Radix-prefixed integer: `0x…` hex or `0b…` binary, with `_` group separators.
+        // The whole lexeme (prefix included) is captured verbatim; the parser/binder
+        // decode it through NumericLiteralFacts. No fraction/exponent scan follows —
+        // a radix literal is integer-only.
+        if (Current == '0' && (Peek(1) is 'x' or 'X' or 'b' or 'B'))
+        {
+            var isHex = Peek(1) is 'x' or 'X';
+            Advance(); // 0
+            Advance(); // x / b
+            while (IsRadixDigit(Current, isHex) || (Current == '_' && IsRadixDigit(Peek(1), isHex)))
+                Advance();
+            return new SyntaxToken(SyntaxTokenKind.NumberLiteral, Cursor.Slice(pos, Cursor.Position), pos, line, col);
+        }
+
         // Digit-group separators: `_` is allowed between digits (1_000_000).
         while (char.IsDigit(Current) || (Current == '_' && char.IsDigit(Peek(1))))
             Advance();
@@ -42,6 +56,34 @@ sealed class LiteralScanner : LexUnit
         }
 
         return new SyntaxToken(SyntaxTokenKind.NumberLiteral, Cursor.Slice(pos, Cursor.Position), pos, line, col);
+    }
+
+    static bool IsRadixDigit(char c, bool isHex) =>
+        isHex ? Uri.IsHexDigit(c) : c is '0' or '1';
+
+    /// `b"…"` — a byte-string literal. A plain (non-interpolated, non-raw) quoted run
+    /// with `\` escapes, captured verbatim (prefix included); the parser decodes the
+    /// bytes. Interpolation is deliberately not a concern here — a byte literal is a
+    /// fixed blob.
+    public SyntaxToken ScanByteString()
+    {
+        var pos = Cursor.Position;
+        var line = Cursor.Line;
+        var col = Cursor.Column;
+
+        Advance(); // b
+        Advance(); // opening "
+        while (Current != '\0' && Current != '"')
+        {
+            if (Current == '\\' && Peek(1) != '\0') { Advance(); Advance(); continue; }
+            Advance();
+        }
+        if (Current != '"')
+            Report(line, col, "Unterminated byte-string literal.");
+        else
+            Advance(); // closing "
+
+        return new SyntaxToken(SyntaxTokenKind.ByteStringLiteral, Cursor.Slice(pos, Cursor.Position), pos, line, col);
     }
 
     public SyntaxToken ScanString()

@@ -57,6 +57,8 @@ public sealed record MethodSymbol : IMethodSymbol
     public bool IsPublic { get; init; }
     public bool IsStatic { get; init; }
     public ReceiverKind ReceiverKind { get; init; }
+    public Esharp.Syntax.SyntaxTokenKind? OperatorKind { get; init; }
+    public IReadOnlyList<BoundType> OperatorParameterTypes { get; init; } = [];
 
     /// The type this method belongs to: a declared `class` method's type, the
     /// receiver a free function promotes onto, a static-func host, or the

@@ -450,10 +450,16 @@ public static class SyntaxPrinter
                     _sb.Append(ns.Name);
                     if (ns.Type is not InferredTypeSyntax) { _sb.Append(": "); Type(ns.Type); }
                     if (ns.Initializer is not null) { _sb.Append(" = "); Expr(ns.Initializer); }
-                    else if (ns.Property?.ComputedGetter is { } getter) { _sb.Append(" => "); Expr(getter); }
+                    else if (ns.Property is { ComputedGetter: { } getter, HasCustomGetter: false }) { _sb.Append(" => "); Expr(getter); }
                     else if (ns.Property is { } prop)
                     {
                         _sb.Append(" { ");
+                        if (prop is { ComputedGetter: { } customGetter, HasCustomGetter: true })
+                        {
+                            _sb.Append("get => ");
+                            Expr(customGetter);
+                            _sb.Append(' ');
+                        }
                         if (prop.SetterBody is { } setter)
                         {
                             _sb.Append("set(").Append(prop.SetterParam ?? "value").Append(") => ");
@@ -484,8 +490,29 @@ public static class SyntaxPrinter
         // type body's inline methods (DeclarationParser): the source form omits it and
         // the parser re-injects it, so printing it would both diverge from the source
         // and grow the parameter list by one `self` on every print/parse round-trip.
+        void Directives(IReadOnlyList<CompilerDirectiveSyntax> directives)
+        {
+            foreach (var directive in directives)
+            {
+                _sb.Append('@').Append(directive.Name);
+                if (directive.Arguments.Count > 0)
+                {
+                    _sb.Append('(');
+                    for (var i = 0; i < directive.Arguments.Count; i++)
+                    {
+                        if (i > 0) _sb.Append(", ");
+                        var argument = directive.Arguments[i];
+                        _sb.Append(argument.Name).Append(": ").Append(argument.Value ? "true" : "false");
+                    }
+                    _sb.Append(')');
+                }
+                _sb.Append('\n').Append(Pad);
+            }
+        }
+
         void Function(FunctionDeclarationSyntax f, bool dropReceiver = false)
         {
+            Directives(f.CompilerDirectives);
             foreach (var attr in f.Attributes) Attribute(attr);
             if (f.IsPublic) _sb.Append("pub ");
             switch (f.Modifier)
@@ -497,7 +524,7 @@ public static class SyntaxPrinter
             if (f.IsTaskFunc) _sb.Append("task ");
             _sb.Append("func ");
             if (f.ExplicitInterface is not null) { Type(f.ExplicitInterface); _sb.Append('.'); }
-            _sb.Append(f.Name);
+            _sb.Append(f.OperatorKind is { } op ? OpText(op) : f.Name);
             TypeParams(f.TypeParameters);
             _sb.Append('(');
             IReadOnlyList<ParameterSyntax> printedParams =
@@ -511,6 +538,7 @@ public static class SyntaxPrinter
 
         void Data(DataDeclarationSyntax d)
         {
+            Directives(d.CompilerDirectives);
             foreach (var attr in d.Attributes) Attribute(attr);
             if (d.DeriveTraits is { Count: > 0 } dt)
                 _sb.Append("derive ").Append(string.Join(", ", dt)).Append('\n');
@@ -576,6 +604,7 @@ public static class SyntaxPrinter
 
         void Interface(InterfaceDeclarationSyntax i)
         {
+            Directives(i.CompilerDirectives);
             if (i.IsPublic) _sb.Append("pub ");
             _sb.Append("interface ").Append(i.Name);
             TypeParams(i.TypeParameters);
@@ -613,7 +642,9 @@ public static class SyntaxPrinter
         void StaticFunc(StaticFuncDeclarationSyntax sf)
         {
             if (sf.IsPublic) _sb.Append("pub ");
-            _sb.Append("static ").Append(sf.Name).Append(" {\n");
+            _sb.Append("static ").Append(sf.Name);
+            TypeParams(sf.GenericParameters);
+            _sb.Append(" {\n");
             _indent++;
             foreach (var field in sf.Fields) { _sb.Append(Pad); Field(field); _sb.Append('\n'); }
             foreach (var fn in sf.Functions) { _sb.Append(Pad); Function(fn); _sb.Append('\n'); }
@@ -648,10 +679,16 @@ public static class SyntaxPrinter
             _sb.Append(f.Name).Append(": ");
             Type(f.Type);
             if (f.DefaultValue is not null) { _sb.Append(" = "); Expr(f.DefaultValue); }
-            else if (f.Property?.ComputedGetter is { } getter) { _sb.Append(" => "); Expr(getter); }
-            else if (f.Property is { } prop && (prop.LocaStorageName is not null || prop.MutStorageName is not null || prop.ScopedMutBody is not null || prop.SetterBody is not null))
+            else if (f.Property is { ComputedGetter: { } getter, HasCustomGetter: false }) { _sb.Append(" => "); Expr(getter); }
+            else if (f.Property is { } prop && (prop.HasCustomGetter || prop.LocaStorageName is not null || prop.MutStorageName is not null || prop.ScopedMutBody is not null || prop.SetterBody is not null))
             {
                 _sb.Append(" { ");
+                if (prop is { ComputedGetter: { } customGetter, HasCustomGetter: true })
+                {
+                    _sb.Append("get => ");
+                    Expr(customGetter);
+                    _sb.Append(' ');
+                }
                 if (prop.LocaStorageName is { } loca) _sb.Append("loca => &self.").Append(loca).Append(' ');
                 if (prop.MutStorageName is { } mut) _sb.Append("mut => &self.").Append(mut).Append(' ');
                 if (prop.ScopedMutBody is { } scoped) { _sb.Append("mut "); Block(scoped); _sb.Append(' '); }
@@ -730,6 +767,19 @@ public static class SyntaxPrinter
         SyntaxTokenKind.StarEquals => "*=",
         SyntaxTokenKind.SlashEquals => "/=",
         SyntaxTokenKind.Ampersand => "&",
+        SyntaxTokenKind.Pipe => "|",
+        SyntaxTokenKind.Tilde => "~",
+        SyntaxTokenKind.ShiftLeft => "<<",
+        SyntaxTokenKind.ShiftRight => ">>",
+        SyntaxTokenKind.UnsignedShiftRight => ">>>",
+        SyntaxTokenKind.PercentEquals => "%=",
+        SyntaxTokenKind.AmpersandEquals => "&=",
+        SyntaxTokenKind.PipeEquals => "|=",
+        SyntaxTokenKind.CaretEquals => "^=",
+        SyntaxTokenKind.ShiftLeftEquals => "<<=",
+        SyntaxTokenKind.ShiftRightEquals => ">>=",
+        SyntaxTokenKind.UnsignedShiftRightEquals => ">>>=",
+        SyntaxTokenKind.At => "@",
         SyntaxTokenKind.QuestionQuestion => "??",
         _ => "?",
     };

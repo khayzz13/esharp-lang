@@ -90,24 +90,25 @@ internal sealed class ExpressionBinder : BinderUnit
         {
             LiteralExpressionSyntax lit => BindLiteral(lit, expectedType),
             NameExpressionSyntax name => BindNameOrConstFold(name, expectedType),
-            UnaryExpressionSyntax unary => BindUnary(unary),
-            BinaryExpressionSyntax binary => BindBinary(binary),
+            UnaryExpressionSyntax unary => BindUnary(unary, expectedType),
+            BinaryExpressionSyntax binary => BindBinary(binary, expectedType),
             MemberAccessExpressionSyntax ma => BindMemberAccess(ma),
             TypeTestExpressionSyntax tt => BindTypeTest(tt),
             CastExpressionSyntax ce => BindCast(ce),
             CallExpressionSyntax call => BindCallBumping(call),
             ObjectCreationExpressionSyntax oc => BindObjectCreation(oc),
             WithExpressionSyntax w => BindWith(w),
-            ConditionalExpressionSyntax cond => BindConditional(cond),
+            ConditionalExpressionSyntax cond => BindConditional(cond, expectedType),
             NullCoalescingExpressionSyntax nc => BindNullCoalescing(nc),
             NullConditionalAccessExpressionSyntax nca => BindNullConditionalAccess(nca),
             ListLiteralExpressionSyntax list => BindListLiteral(list),
             ArrayCreationExpressionSyntax ac => BindArrayCreation(ac),
+            StackAllocExpressionSyntax sa => BindStackAlloc(sa, expectedType),
             TupleExpressionSyntax tuple => BindTupleLiteral(tuple),
             // BoundParenthesizedExpression is dropped in the frozen contract —
             // the binder unwraps parenthesized expressions in-place so they never
             // enter the bound tree. The span stamp below will use the inner's span.
-            ParenthesizedExpressionSyntax p => BindExpression(p.Expression),
+            ParenthesizedExpressionSyntax p => BindExpression(p.Expression, expectedType),
             IndexExpressionSyntax idx => BindIndex(idx),
             RangeExpressionSyntax range => BindRange(range),
             SpawnExpressionSyntax spawn => BindSpawn(spawn),
@@ -262,6 +263,9 @@ internal sealed class ExpressionBinder : BinderUnit
             return new BoundInterpolatedStringExpression(parts, new PrimitiveType("string"));
         }
 
+        if (syntax.Value is NumericLiteralValue raw)
+            return BindNumericLiteral(syntax, raw.Text, expectedType);
+
         var type = syntax.Value switch
         {
             null => (BoundType)new NullType(),
@@ -270,6 +274,7 @@ internal sealed class ExpressionBinder : BinderUnit
             bool => new PrimitiveType("bool"),
             string => new PrimitiveType("string"),
             char => new PrimitiveType("char"),
+            byte[] => new ArrayBoundType(new PrimitiveType("byte")),   // a `b"…"` byte-string literal
             _ => new ExternalType("object"),
         };
         // A numeric literal adopts an expected numeric type — `0.0` lands as `float`, `5` as
@@ -288,6 +293,75 @@ internal sealed class ExpressionBinder : BinderUnit
         }
         return new BoundLiteralExpression(syntax.Value, syntax.Text, type);
     }
+
+    BoundExpression BindNumericLiteral(LiteralExpressionSyntax syntax, string raw, BoundType? expectedType)
+    {
+        var contextName = expectedType is PrimitiveType ep && IsNumericPrimitive(ep.Name) ? ep.Name : null;
+
+        // Radix integer (0x / 0b): decode to a magnitude and type by value — the same
+        // int→long→ulong widening and per-target range check the decimal path uses.
+        if (Esharp.Syntax.Lexing.NumericLiteralFacts.IsRadixInteger(raw))
+        {
+            if (!Esharp.Syntax.Lexing.NumericLiteralFacts.TryDecodeRadixInteger(raw, out var magnitude))
+            {
+                Diagnostics.Report(syntax.Span, DiagnosticDescriptors.NumericValueOutOfRange, raw, contextName ?? "int");
+                return new BoundErrorExpression();
+            }
+            var radixTarget = contextName ?? Esharp.Syntax.Lexing.NumericLiteralFacts.InferIntegerType(magnitude);
+            var radixValue = Esharp.Syntax.Lexing.NumericLiteralFacts.FitMagnitude(magnitude, radixTarget);
+            if (radixValue is null)
+            {
+                Diagnostics.Report(syntax.Span, DiagnosticDescriptors.NumericValueOutOfRange, raw, radixTarget);
+                return new BoundErrorExpression();
+            }
+            return new BoundLiteralExpression(radixValue, syntax.Text, new PrimitiveType(radixTarget));
+        }
+
+        var text = raw.Replace("_", "", StringComparison.Ordinal);
+        var fractional = text.Contains('.') || text.Contains('e') || text.Contains('E');
+        var target = expectedType is PrimitiveType p && IsNumericPrimitive(p.Name)
+            ? p.Name
+            : null;
+
+        // Unconstrained literals retain E#'s existing inference order.
+        if (target is null)
+        {
+            if (fractional) target = "double";
+            else if (int.TryParse(text, System.Globalization.NumberStyles.Integer,
+                         System.Globalization.CultureInfo.InvariantCulture, out _)) target = "int";
+            else if (long.TryParse(text, System.Globalization.NumberStyles.Integer,
+                         System.Globalization.CultureInfo.InvariantCulture, out _)) target = "long";
+            else target = "ulong";
+        }
+
+        object? value = target switch
+        {
+            "byte" => byte.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "sbyte" => sbyte.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "short" => short.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "ushort" or "char" => ushort.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "int" => int.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "uint" => uint.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "long" => long.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "ulong" => ulong.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "nint" => nint.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "nuint" => nuint.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "float" => float.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "double" => double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            "decimal" => decimal.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            _ => null,
+        };
+        if (value is null)
+        {
+            Diagnostics.Report(syntax.Span, DiagnosticDescriptors.NumericValueOutOfRange, raw, target!);
+            return new BoundErrorExpression();
+        }
+        if (target == "char") value = (char)(ushort)value;
+        return new BoundLiteralExpression(value, syntax.Text, new PrimitiveType(target));
+    }
+
+    static bool IsNumericPrimitive(string name) => name is "byte" or "sbyte" or "short" or "ushort"
+        or "int" or "uint" or "long" or "ulong" or "nint" or "nuint" or "float" or "double" or "decimal" or "char";
 
     // Const-fold a bare name: function-body / static-func consts live in the
     // scope's constant table, namespace consts on the symbol table. Either way
@@ -386,6 +460,11 @@ internal sealed class ExpressionBinder : BinderUnit
             if (Data.Sink is not Semantics.NullSemanticSink)
                 Data.Sink.OnTypeResolved(Data.Externals.ForType(extRuntime), syntax.Span, Semantics.SymbolOccurrence.Use);
         }
+        // Generic constructor/static-receiver syntax is currently represented by the
+        // parser as one name (`Vector<float>`). Recover the already-supported structured
+        // bound type here so codegen never has to interpret angle-bracket text.
+        if (type is null && syntax.Name.Contains('<') && LooksLikeTypeName(syntax.Name))
+            type = ResolveTypeName(syntax.Name);
         if (type is null && Ctx.StaticImports.ContainsKey(syntax.Name))
             type = new ExternalType(syntax.Name);
 
@@ -407,6 +486,15 @@ internal sealed class ExpressionBinder : BinderUnit
                 || !Data.Symbols.HasFunction($"{sfHost}.{syntax.Name}"))
             && !Data.Symbols.IsKnownNamespace(syntax.Name))
         {
+            // Masked-resolution ICE guard: a bare value name reaches here only after the
+            // narrow checks above (a plain function, a namespace) all missed it. If the
+            // name is nonetheless known as a function/constant/type in a table this site
+            // did not consult (a facet/host-qualified function, a promoted function, a
+            // type member), the failure is a scope/context bug, not an undefined name —
+            // surface it as an ICE at the root instead of the red-herring ES2146.
+            if (ResolutionIce.RaiseIfKnown(Diagnostics, Data.Symbols, syntax.Name, "binder", syntax.Span,
+                    ResolvableKind.Method, ResolvableKind.Constant, ResolvableKind.Type))
+                return new BoundErrorExpression();
             Diagnostics.Report(syntax.Span,
                 $"ES2146: undefined name '{syntax.Name}' — no local, parameter, function, type, or namespace by this name is in scope.");
             return new BoundErrorExpression();
@@ -424,23 +512,62 @@ internal sealed class ExpressionBinder : BinderUnit
     /// no-op for same-type, null-literal, and reference flows (Classify → Identity / null),
     /// and for the EXPLICIT `as` / `as!` / unbox casts, which already carry their own
     /// nodes. Idempotent — a value already at the target type wraps to nothing.
-    internal BoundExpression Coerce(BoundExpression value, BoundType target) =>
-        ConversionClassification.Classify(value.Type, target) switch
+    internal BoundExpression Coerce(BoundExpression value, BoundType target)
+    {
+        var targetRuntime = ResolveBoundTypeToRuntime(target);
+        if (IsByRefLike(value.Type) && (targetRuntime == typeof(object) || targetRuntime?.IsInterface == true))
+        {
+            Diagnostics.Report(value.Span, DiagnosticDescriptors.ByRefLikeBoxing,
+                TypeDisplayName(value.Type), TypeDisplayName(target));
+            return new BoundErrorExpression();
+        }
+        var conversion = ConversionClassification.Classify(value.Type, target);
+        if (conversion == ConversionKind.Box && IsByRefLike(value.Type))
+        {
+            Diagnostics.Report(value.Span, DiagnosticDescriptors.ByRefLikeBoxing,
+                TypeDisplayName(value.Type), TypeDisplayName(target));
+            return new BoundErrorExpression();
+        }
+        if (conversion == ConversionKind.Box && Data.ShowAllocations)
+            Diagnostics.Warn(value.Span, DiagnosticDescriptors.BoxingAllocation,
+                TypeDisplayName(value.Type), TypeDisplayName(target));
+        return conversion switch
         {
             ConversionKind.Box => BoundConversion.Box(value, target),
             ConversionKind.NullableWrap when target is NullableType nt => BoundConversion.WrapNullable(value, nt),
+            ConversionKind.ImplicitSpan => BoundConversion.ImplicitSpan(value, target),
             _ => value,
         };
+    }
 
-    BoundUnaryExpression BindUnary(UnaryExpressionSyntax syntax)
+    BoundUnaryExpression BindUnary(UnaryExpressionSyntax syntax, BoundType? expectedType = null)
     {
-        var operand = BindExpression(syntax.Operand);
+        var numericExpected = expectedType is PrimitiveType { Name: var name } && IsNumericPrimitive(name)
+            ? expectedType : null;
+        var operand = BindExpression(syntax.Operand, numericExpected);
+        if (NeedsOperatorLookup(operand.Type) && TryResolveSourceOperator(syntax.OperatorKind, [syntax.Operand], [operand], out var source, out var sourceArgs, out var sourceReturn))
+            return new BoundUnaryExpression(syntax.OperatorKind, sourceArgs[0], sourceReturn) { ResolvedOperator = source };
+        if (NeedsOperatorLookup(operand.Type) && TryResolveCSharpOperator(syntax.OperatorKind, [syntax.Operand], [operand], out var csOwner, out var csOperator, out var csArgs, out var csReturn))
+            return new BoundUnaryExpression(syntax.OperatorKind, csArgs[0], csReturn)
+            {
+                ExternalCSharpOperatorOwner = csOwner,
+                ExternalCSharpOperator = csOperator,
+            };
+        if (NeedsOperatorLookup(operand.Type) && TryResolveExternalOperator(syntax.OperatorKind, [syntax.Operand], [operand], out var external, out var externalArgs, out var externalReturn))
+            return new BoundUnaryExpression(syntax.OperatorKind, externalArgs[0], externalReturn) { ExternalOperator = external };
+        if (syntax.OperatorKind == SyntaxTokenKind.Tilde && !IsIntegralType(operand.Type))
+            Diagnostics.Report(syntax.Span, $"ES2283: unary '~' requires an integral operand or an exact operator overload, not '{TypeDisplayName(operand.Type)}'.");
+        if (syntax.OperatorKind == SyntaxTokenKind.Plus
+            && (operand.Type is not PrimitiveType { Name: var unaryName } || !IsNumericPrimitive(unaryName)))
+            Diagnostics.Report(syntax.Span, $"ES2283: unary '+' requires a numeric operand or an exact operator overload, not '{TypeDisplayName(operand.Type)}'.");
         return new BoundUnaryExpression(syntax.OperatorKind, operand, operand.Type);
     }
 
-    BoundBinaryExpression BindBinary(BinaryExpressionSyntax syntax)
+    BoundBinaryExpression BindBinary(BinaryExpressionSyntax syntax, BoundType? expectedType = null)
     {
-        var left = BindExpression(syntax.Left);
+        var numericExpected = expectedType is PrimitiveType { Name: var name } && IsNumericPrimitive(name)
+            ? expectedType : null;
+        var left = BindExpression(syntax.Left, numericExpected);
 
         // `a && b` short-circuits: `b` only evaluates where `a` held, so `a`'s positive
         // narrows are in scope binding `b` — this is what makes `s is T && s.member` bind.
@@ -449,12 +576,33 @@ internal sealed class ExpressionBinder : BinderUnit
             var (pos, _) = Narrowing.Extract(left);
             var saved = SaveNarrows();
             ApplyNarrows(pos);
-            var rightNarrowed = BindExpression(syntax.Right);
+            var rightNarrowed = BindExpression(syntax.Right, numericExpected);
             RestoreNarrows(saved);
             return new BoundBinaryExpression(left, syntax.OperatorKind, rightNarrowed, new PrimitiveType("bool"));
         }
 
-        var right = BindExpression(syntax.Right);
+        // A shift is asymmetric — a value `<<`/`>>`/`>>>` an **int shift count** — not a
+        // symmetric two-operand numeric op. The count is always `int` regardless of the
+        // shifted value's type, so it is bound against `int` (a bare `1` becomes `int`,
+        // not the LHS's `uint`), and it is exempt from both the numeric-peer re-binding
+        // and the same-type requirement below. The result type is the LHS's.
+        var isShift = IsShiftOperator(syntax.OperatorKind);
+        var right = isShift
+            ? BindExpression(syntax.Right, new PrimitiveType("int"))
+            : BindExpression(syntax.Right, numericExpected);
+        // Numeric literals are context-sensitive. Bind the raw side again against
+        // the concrete numeric peer so `decimalValue + 0.1` and `0.1 + decimalValue`
+        // both keep the literal in decimal rather than first rounding it to double.
+        // Skipped for shifts, whose two sides are independently typed.
+        if (!isShift)
+        {
+            if (syntax.Left is LiteralExpressionSyntax { Value: NumericLiteralValue }
+                && right.Type is PrimitiveType { Name: var rightName } && IsNumericPrimitive(rightName))
+                left = BindExpression(syntax.Left, right.Type);
+            if (syntax.Right is LiteralExpressionSyntax { Value: NumericLiteralValue }
+                && left.Type is PrimitiveType { Name: var leftName } && IsNumericPrimitive(leftName))
+                right = BindExpression(syntax.Right, left.Type);
+        }
         // A source-declared Task / ValueTask is caller-handled by design. It is
         // not the uncolored async result that SyncFutureLowering joins on first
         // use, so allowing it into arithmetic reaches CodeGen as (for example)
@@ -476,7 +624,208 @@ internal sealed class ExpressionBinder : BinderUnit
             SyntaxTokenKind.AndKeyword or SyntaxTokenKind.OrKeyword => (BoundType)new PrimitiveType("bool"),
             _ => left.Type, // arithmetic — type of left operand
         };
+        if (!isShift
+            && IsValueOperator(syntax.OperatorKind)
+            && left.Type is PrimitiveType { Name: var lhs }
+            && right.Type is PrimitiveType { Name: var rhs }
+            && IsNumericPrimitive(lhs) && IsNumericPrimitive(rhs) && lhs != rhs)
+        {
+            Diagnostics.Report(syntax.Span, DiagnosticDescriptors.InvalidNumericConversion,
+                $"Numeric operands '{lhs}' and '{rhs}' require an explicit conversion.");
+            return new BoundBinaryExpression(left, syntax.OperatorKind, right, new BoundErrorExpression().Type);
+        }
+        if ((NeedsOperatorLookup(left.Type) || NeedsOperatorLookup(right.Type))
+            && TryResolveSourceOperator(syntax.OperatorKind, [syntax.Left, syntax.Right], [left, right], out var source, out var sourceArgs, out var sourceReturn))
+            return new BoundBinaryExpression(sourceArgs[0], syntax.OperatorKind, sourceArgs[1], sourceReturn) { ResolvedOperator = source };
+        if ((NeedsOperatorLookup(left.Type) || NeedsOperatorLookup(right.Type))
+            && TryResolveCSharpOperator(syntax.OperatorKind, [syntax.Left, syntax.Right], [left, right], out var csOwner, out var csOperator, out var csArgs, out var csReturn))
+            return new BoundBinaryExpression(csArgs[0], syntax.OperatorKind, csArgs[1], csReturn)
+            {
+                ExternalCSharpOperatorOwner = csOwner,
+                ExternalCSharpOperator = csOperator,
+            };
+        if ((NeedsOperatorLookup(left.Type) || NeedsOperatorLookup(right.Type))
+            && TryResolveExternalOperator(syntax.OperatorKind, [syntax.Left, syntax.Right], [left, right], out var external, out var externalArgs, out var externalReturn))
+            return new BoundBinaryExpression(externalArgs[0], syntax.OperatorKind, externalArgs[1], externalReturn) { ExternalOperator = external };
+        ValidatePrimitiveOperatorOperands(syntax, left, right);
         return new BoundBinaryExpression(left, syntax.OperatorKind, right, resultType);
+    }
+
+    void ValidatePrimitiveOperatorOperands(BinaryExpressionSyntax syntax, BoundExpression left, BoundExpression right)
+    {
+        if (syntax.OperatorKind is SyntaxTokenKind.Ampersand or SyntaxTokenKind.Pipe or SyntaxTokenKind.Caret)
+        {
+            var valid = left.Type is PrimitiveType { Name: "bool" }
+                && right.Type is PrimitiveType { Name: "bool" }
+                || IsIntegralType(left.Type) && SameOperatorType(left.Type, right.Type);
+            if (!valid)
+                Diagnostics.Report(syntax.Span, $"ES2283: '{Esharp.Binder.Binder.OperatorGlyph(syntax.OperatorKind)}' requires two bool operands or two operands of the same integral type.");
+        }
+        else if (syntax.OperatorKind is SyntaxTokenKind.ShiftLeft or SyntaxTokenKind.ShiftRight or SyntaxTokenKind.UnsignedShiftRight)
+        {
+            if (!IsIntegralType(left.Type) || right.Type is not PrimitiveType { Name: "int" })
+                Diagnostics.Report(syntax.Span, $"ES2283: '{Esharp.Binder.Binder.OperatorGlyph(syntax.OperatorKind)}' requires an integral left operand and an int shift count.");
+        }
+    }
+
+    static bool IsShiftOperator(SyntaxTokenKind op) =>
+        op is SyntaxTokenKind.ShiftLeft or SyntaxTokenKind.ShiftRight or SyntaxTokenKind.UnsignedShiftRight;
+
+    static bool IsIntegralType(BoundType type) => type is PrimitiveType { Name: "byte" or "sbyte" or "short" or "ushort"
+        or "int" or "uint" or "long" or "ulong" or "nint" or "nuint" or "char" };
+
+    static bool NeedsOperatorLookup(BoundType type) => type switch
+    {
+        PrimitiveType { Name: var name } => !IsNumericPrimitive(name) && name is not ("bool" or "string"),
+        _ => true,
+    };
+
+    bool TryResolveSourceOperator(SyntaxTokenKind op, IReadOnlyList<ExpressionSyntax> syntaxOperands, IReadOnlyList<BoundExpression> operands,
+        out MethodSymbol? selected, out IReadOnlyList<BoundExpression> selectedOperands, out BoundType returnType)
+    {
+        selected = null;
+        selectedOperands = operands;
+        returnType = InferredType.Instance;
+        var owners = operands.Select(e => e.Type).OfType<DataType>()
+            .Select(t => t.Symbol).Where(s => s is not null).Cast<TypeSymbol>().Distinct().ToList();
+        var matches = new List<(MethodSymbol Method, IReadOnlyList<BoundExpression> Args, BoundType Return)>();
+        foreach (var owner in owners)
+        foreach (var candidate in owner.Members.Where(m => m.OperatorKind == op && m.OperatorParameterTypes.Count == operands.Count))
+        {
+            var substitutions = OperatorTypeSubstitutions(owner, operands);
+            var parameters = candidate.OperatorParameterTypes.Select(t => SubstituteOperatorType(t, substitutions)).ToList();
+            var args = new List<BoundExpression>(operands.Count);
+            var applicable = true;
+            for (var i = 0; i < operands.Count; i++)
+            {
+                var argument = syntaxOperands[i] is LiteralExpressionSyntax { Value: NumericLiteralValue }
+                    && parameters[i] is PrimitiveType
+                    ? BindExpression(syntaxOperands[i], parameters[i])
+                    : operands[i];
+                if (!SameOperatorType(argument.Type, parameters[i])) { applicable = false; break; }
+                args.Add(argument);
+            }
+            if (applicable)
+                matches.Add((candidate, args, SubstituteOperatorType(candidate.ReturnType ?? new VoidType(), substitutions)));
+        }
+        if (matches.Count == 0) return false;
+        if (matches.Count > 1)
+        {
+            Diagnostics.Report(operands[0].Span, $"ES2281: operator '{Esharp.Binder.Binder.OperatorGlyph(op)}' is ambiguous for these exact operand types.");
+            return false;
+        }
+        (selected, selectedOperands, returnType) = matches[0];
+        return true;
+    }
+
+    Dictionary<string, BoundType> OperatorTypeSubstitutions(TypeSymbol owner, IReadOnlyList<BoundExpression> operands)
+    {
+        var map = new Dictionary<string, BoundType>(StringComparer.Ordinal);
+        var actual = operands.Select(o => o.Type).OfType<DataType>()
+            .FirstOrDefault(d => ReferenceEquals(d.Symbol, owner) || (d.Name == owner.Name && d.TypeParameters.Count == owner.Arity));
+        if (actual is null) return map;
+        for (var i = 0; i < actual.TypeParameters.Count && i < actual.TypeArgs.Count; i++)
+            map[actual.TypeParameters[i]] = actual.TypeArgs[i];
+        return map;
+    }
+
+    static BoundType SubstituteOperatorType(BoundType type, IReadOnlyDictionary<string, BoundType> map) => type switch
+    {
+        PrimitiveType p when map.TryGetValue(p.Name, out var replacement) => replacement,
+        ExternalType e when e.TypeArgs.Count == 0 && map.TryGetValue(e.Name, out var replacement) => replacement,
+        DataType d when d.TypeArgs.Count > 0 => d with { TypeArguments = d.TypeArgs.Select(t => SubstituteOperatorType(t, map)).ToList() },
+        ExternalType e when e.TypeArgs.Count > 0 => e with { TypeArguments = e.TypeArgs.Select(t => SubstituteOperatorType(t, map)).ToList() },
+        NullableType n => new NullableType(SubstituteOperatorType(n.Inner, map)),
+        ArrayBoundType a => new ArrayBoundType(SubstituteOperatorType(a.ElementType, map)),
+        _ => type,
+    };
+
+    static bool SameOperatorType(BoundType left, BoundType right) =>
+        TypeDisplayName(left) == TypeDisplayName(right);
+
+    bool TryResolveCSharpOperator(SyntaxTokenKind op, IReadOnlyList<ExpressionSyntax> syntaxOperands,
+        IReadOnlyList<BoundExpression> operands, out ExternalCSharpType? selectedOwner,
+        out ICSharpMemberHandle? selected, out IReadOnlyList<BoundExpression> selectedOperands,
+        out BoundType returnType)
+    {
+        selectedOwner = null;
+        selected = null;
+        selectedOperands = operands;
+        returnType = InferredType.Instance;
+        var metadataName = Esharp.OperatorFacts.MetadataName(op, operands.Count);
+        if (metadataName is null) return false;
+        var owners = operands.Select(o => o.Type).OfType<ExternalCSharpType>()
+            .GroupBy(o => o.Handle.FullMetadataName, StringComparer.Ordinal).Select(g => g.First());
+        var matches = new List<(ExternalCSharpType Owner, ICSharpMemberHandle Member, IReadOnlyList<BoundExpression> Args)>();
+        foreach (var owner in owners)
+        foreach (var member in owner.Handle.Members.Where(m => m.IsPublic && m.IsStatic
+            && m.Kind == CSharpMemberKind.Method && m.Name == metadataName && m.Parameters.Count == operands.Count))
+        {
+            var args = new List<BoundExpression>(operands.Count);
+            var applicable = true;
+            for (var i = 0; i < operands.Count; i++)
+            {
+                var argument = syntaxOperands[i] is LiteralExpressionSyntax { Value: NumericLiteralValue }
+                    && member.Parameters[i].Type is PrimitiveType
+                    ? BindExpression(syntaxOperands[i], member.Parameters[i].Type)
+                    : operands[i];
+                if (!SameOperatorType(argument.Type, member.Parameters[i].Type)) { applicable = false; break; }
+                args.Add(argument);
+            }
+            if (applicable) matches.Add((owner, member, args));
+        }
+        if (matches.Count == 0) return false;
+        if (matches.Count > 1)
+        {
+            Diagnostics.Report(operands[0].Span, $"ES2281: imported operator '{Esharp.Binder.Binder.OperatorGlyph(op)}' is ambiguous for these exact operand types.");
+            return false;
+        }
+        (selectedOwner, selected, selectedOperands) = matches[0];
+        returnType = selected.ReturnType;
+        return true;
+    }
+
+    bool TryResolveExternalOperator(SyntaxTokenKind op, IReadOnlyList<ExpressionSyntax> syntaxOperands,
+        IReadOnlyList<BoundExpression> operands, out System.Reflection.MethodInfo? selected,
+        out IReadOnlyList<BoundExpression> selectedOperands, out BoundType returnType)
+    {
+        selected = null;
+        selectedOperands = operands;
+        returnType = InferredType.Instance;
+        var metadataName = Esharp.OperatorFacts.MetadataName(op, operands.Count);
+        if (metadataName is null) return false;
+        var runtimeOwners = operands.Select(o => Types.ResolveBoundTypeToRuntime(o.Type)).Where(t => t is not null).Cast<Type>().Distinct();
+        var matches = new List<System.Reflection.MethodInfo>();
+        foreach (var owner in runtimeOwners)
+        foreach (var method in owner.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        {
+            if (method.Name != metadataName || method.GetParameters().Length != operands.Count) continue;
+            var parameters = method.GetParameters();
+            var applicable = true;
+            for (var i = 0; i < operands.Count; i++)
+            {
+                var rebound = syntaxOperands[i] is LiteralExpressionSyntax { Value: NumericLiteralValue }
+                    ? BindExpression(syntaxOperands[i], MapRuntimeTypeToBoundType(parameters[i].ParameterType))
+                    : operands[i];
+                var actual = Types.ResolveBoundTypeToRuntime(rebound.Type);
+                if (actual != parameters[i].ParameterType) { applicable = false; break; }
+            }
+            if (applicable && !matches.Contains(method)) matches.Add(method);
+        }
+        if (matches.Count == 0) return false;
+        if (matches.Count > 1)
+        {
+            Diagnostics.Report(operands[0].Span, $"ES2281: imported operator '{Esharp.Binder.Binder.OperatorGlyph(op)}' is ambiguous for these exact operand types.");
+            return false;
+        }
+        var selectedMethod = matches[0];
+        selected = selectedMethod;
+        selectedOperands = syntaxOperands.Select((syntaxOperand, i) =>
+            syntaxOperand is LiteralExpressionSyntax { Value: NumericLiteralValue }
+                ? BindExpression(syntaxOperand, MapRuntimeTypeToBoundType(selectedMethod.GetParameters()[i].ParameterType))
+                : operands[i]).ToList();
+        returnType = MapRuntimeTypeToBoundType(selectedMethod.ReturnType);
+        return true;
     }
 
     static bool IsExplicitAwaitable(BoundType type) => type switch
@@ -493,12 +842,12 @@ internal sealed class ExpressionBinder : BinderUnit
         SyntaxTokenKind.AmpAmp or SyntaxTokenKind.PipePipe or
         SyntaxTokenKind.AndKeyword or SyntaxTokenKind.OrKeyword);
 
-    BoundConditionalExpression BindConditional(ConditionalExpressionSyntax syntax)
+    BoundConditionalExpression BindConditional(ConditionalExpressionSyntax syntax, BoundType? expectedType = null)
     {
         var condition = BindExpression(syntax.Condition);
-        var consequence = BindExpression(syntax.Consequence);
-        var alternative = BindExpression(syntax.Alternative);
-        return new BoundConditionalExpression(condition, consequence, alternative, consequence.Type);
+        var consequence = BindExpression(syntax.Consequence, expectedType);
+        var alternative = BindExpression(syntax.Alternative, expectedType);
+        return new BoundConditionalExpression(condition, consequence, alternative, expectedType ?? consequence.Type);
     }
 
     BoundNullCoalescingExpression BindNullCoalescing(NullCoalescingExpressionSyntax syntax)
@@ -630,6 +979,18 @@ internal sealed class ExpressionBinder : BinderUnit
         return new BoundArrayCreationExpression(elementType, size, new ArrayBoundType(elementType));
     }
 
+    // `stackalloc T[](n)` → a `Span<T>` (default) or `ReadOnlySpan<T>` when the context
+    // target-types one. The frame-local buffer is a by-ref-like value; the existing
+    // escape/return rules (ES2231–2234) govern it exactly as any other span.
+    BoundStackAllocExpression BindStackAlloc(StackAllocExpressionSyntax syntax, BoundType? expectedType)
+    {
+        var elementType = ResolveType(syntax.ElementType);
+        var size = BindExpression(syntax.Size);
+        var wantsReadOnly = expectedType is ExternalType { Name: "ReadOnlySpan" };
+        var spanType = new ExternalType(wantsReadOnly ? "ReadOnlySpan" : "Span", new[] { elementType });
+        return new BoundStackAllocExpression(elementType, size, spanType);
+    }
+
     BoundTupleLiteralExpression BindTupleLiteral(TupleExpressionSyntax syntax)
     {
         var elements = syntax.Elements.Select(e => BindExpression(e)).ToList();
@@ -666,6 +1027,20 @@ internal sealed class ExpressionBinder : BinderUnit
         }
 
         var target = BindExpression(syntax.Target);
+
+        // Named tuple element access: `t.name` resolves to the underlying `.ItemN` field
+        // of the ValueTuple. Names are pure binder-side sugar — the emitted access reads
+        // the positional field, so downstream codegen is unchanged.
+        if (target.Type is TupleType namedTuple && namedTuple.ElementNames is { } tupleLabels)
+        {
+            var labelIndex = tupleLabels.ToList().IndexOf(syntax.MemberName);
+            if (labelIndex >= 0)
+            {
+                var itemName = $"Item{labelIndex + 1}";
+                return new BoundMemberAccessExpression(target, itemName,
+                    namedTuple.ElementTypes[labelIndex]);
+            }
+        }
 
         // Positional-data destructure: `let (a, b) = v` desugars to `.ItemN` reads
         // in the parser (the tuple path). Over a positional `data`, ItemN maps to
@@ -884,7 +1259,7 @@ internal sealed class ExpressionBinder : BinderUnit
     static readonly HashSet<string> PrimitiveNames = new(StringComparer.Ordinal)
     {
         "int", "long", "double", "float", "bool", "string", "byte", "short",
-        "char", "uint", "ulong", "ushort", "sbyte", "decimal", "void",
+        "char", "uint", "ulong", "ushort", "sbyte", "nint", "nuint", "decimal", "void",
     };
 
     // Flatten a member-access chain of plain names to a dotted string
@@ -1124,7 +1499,16 @@ internal sealed class ExpressionBinder : BinderUnit
                         indexer = runtime.GetProperty(defaultMember.MemberName);
                 }
                 if (indexer is not null)
-                    elementType = MapRuntimeTypeToBoundType(indexer.PropertyType);
+                {
+                    // A ref-returning indexer (`Span<T>`/`ReadOnlySpan<T>.this[int]` →
+                    // `ref T` / `ref readonly T`) reflects a by-ref `PropertyType`
+                    // (`Byte&`). An rvalue read is the element value, so deref it —
+                    // codegen still emits the ref-return getter + load. Without this the
+                    // `T&` leaks into `let x = span[i]` and `int(span[i])`.
+                    var pt = indexer.PropertyType;
+                    if (pt.IsByRef) pt = pt.GetElementType()!;
+                    elementType = MapRuntimeTypeToBoundType(pt);
+                }
             }
         }
 
@@ -1482,6 +1866,24 @@ internal sealed class ExpressionBinder : BinderUnit
                 return new BoundResultCallExpression(false, BindExpression(syntax.Arguments[0]), rt.OkType, rt.ErrorType);
         }
 
+        if (syntax.Target is NameExpressionSyntax numericName
+            && Scope.Lookup(numericName.Name) is null
+            && !Data.Symbols.HasFunction(numericName.Name)
+            && IsNumericPrimitive(numericName.Name))
+            return BindNativeNumericConversion(syntax, numericName.Name);
+
+        // `EnumName(intValue)` — the inverse of `byte(enumValue)`: convert an integer to
+        // an enum value. Symmetric with the primitive native conversions above; the
+        // on-disk codec byte becomes the typed `ModelFileCodec`. Only fires when the
+        // name is a known enum type and nothing else shadows it.
+        if (syntax.Target is NameExpressionSyntax enumConvName
+            && syntax.Arguments.Count == 1
+            && syntax.ArgumentNames is not { Count: > 0 }
+            && Scope.Lookup(enumConvName.Name) is null
+            && !Data.Symbols.HasFunction(enumConvName.Name)
+            && Data.Symbols.ResolveBound(enumConvName.Name, 0) is EnumType enumTarget)
+            return BindEnumFromIntegerConversion(syntax, enumTarget);
+
         // `Choice.case(args)` — qualified case construction. Per spec [REFERENCE.md
         // line 461 and 487], both `.case(args)` and `Type.case(args)` are valid.
         // The dot-case path is already handled; rewrite the qualified form to
@@ -1720,14 +2122,34 @@ internal sealed class ExpressionBinder : BinderUnit
             // inferred args (→ `Wrap<int>`), not the open declared return below.
             returnType = pgRet;
         }
-        else if (target is BoundMemberAccessExpression ma && Data.Symbols.TryGetFunction(ma.MemberName)?.ReturnType is { } memberReturn)
+        else if (target is BoundMemberAccessExpression ma
+                 && ReceiverMethodReturn(ma, args) is { } memberReturn)
         {
-            // An in-body / receiver method on a CLOSED generic receiver returns the
-            // declared type with the receiver's type arguments substituted in: `get`
-            // on `Box<Box<int>>` declared `-> T` returns `Box<int>`, not the open `T`.
-            // Without this the result types as the open parameter and the next member
-            // access dispatches on the erased `object` (probe3 #1, nested user generics).
-            returnType = SubstituteReceiverTypeArgs(memberReturn, ma.Target.Type);
+            // An in-body / receiver method resolved on the RECEIVER's own type
+            // (per the method-only attachment rule, functions/methods.md). On a
+            // CLOSED generic receiver its declared return has the receiver's type
+            // arguments substituted in: `get` on `Box<Box<int>>` declared `-> T`
+            // returns `Box<int>`, not the open `T`. Resolution walks the receiver
+            // type's member set, NOT the module-wide bare-name function table —
+            // which is what kept `stream.Read(span)` from binding a same-named E#
+            // method's return (`ModelFile.Read -> SectionReader`) instead of the
+            // real `Stream.Read -> int`.
+            returnType = memberReturn;
+        }
+        else if (target is BoundMemberAccessExpression
+                 && syntax.Target is MemberAccessExpressionSyntax nsSyntax
+                 && TryFlattenDottedName(nsSyntax) is { } flatCall
+                 && flatCall.LastIndexOf('.') is var nsDot && nsDot > 0
+                 && Data.Symbols.IsKnownNamespace(flatCall[..nsDot])
+                 && Data.Symbols.TryGetFunction(nsSyntax.MemberName)?.ReturnType is { } nsFreeReturn)
+        {
+            // Namespace-qualified free-function call `NS.fn(args)` (`Lib.Inner.seed()`):
+            // the free function is resolved by name within its declaring namespace, so
+            // its declared return is the call's type. Gated on the SYNTACTIC prefix being
+            // a known namespace — a value-receiver method (`stream.Read(...)`, prefix a
+            // local) never matches here; those resolve via ReceiverMethodReturn above or
+            // fall through to reflection below.
+            returnType = nsFreeReturn;
         }
         else if (target is BoundMemberAccessExpression enumMa
                  && enumMa.Target is BoundNameExpression enumTypeName
@@ -1916,6 +2338,102 @@ internal sealed class ExpressionBinder : BinderUnit
         return call;
     }
 
+    BoundExpression BindNativeNumericConversion(CallExpressionSyntax syntax, string targetName)
+    {
+        if (syntax.Arguments.Count != 1 || syntax.ArgumentNames is { Count: > 0 }
+            || syntax.TypeArguments is { Count: > 0 })
+        {
+            Diagnostics.Report(syntax.Span, DiagnosticDescriptors.InvalidNumericConversion,
+                $"Numeric conversion '{targetName}(value)' requires exactly one positional argument.");
+            return new BoundErrorExpression();
+        }
+        var target = new PrimitiveType(targetName);
+        var argSyntax = syntax.Arguments[0];
+        var operand = argSyntax is LiteralExpressionSyntax { Value: NumericLiteralValue }
+            ? BindExpression(argSyntax, target)
+            : BindExpression(argSyntax);
+        if (operand is BoundErrorExpression) return operand;
+        // An enum converts through its underlying integral (`byte(codec)` on a
+        // `byte`-backed enum) — the CLR value on the stack already IS that integral,
+        // so the numeric-conversion codegen treats the enum as its underlying type.
+        var source = operand.Type switch
+        {
+            PrimitiveType { Name: var n } when IsNumericPrimitive(n) => n,
+            EnumType et => et.UnderlyingPrimitiveName,
+            _ => null,
+        };
+        if (source is null)
+        {
+            Diagnostics.Report(syntax.Span, DiagnosticDescriptors.InvalidNumericConversion,
+                $"Cannot convert '{TypeDisplayName(operand.Type)}' to numeric type '{targetName}'.");
+            return new BoundErrorExpression();
+        }
+        if (ConstantFolder.Fold(operand) is BoundLiteralExpression folded)
+        {
+            try
+            {
+                var converted = ConvertNumericConstant(folded.Value!, targetName);
+                return new BoundLiteralExpression(converted, converted.ToString() ?? "", target);
+            }
+            catch (Exception exception) when (exception is OverflowException or InvalidCastException or FormatException)
+            {
+                Diagnostics.Report(syntax.Span, DiagnosticDescriptors.NumericValueOutOfRange,
+                    folded.Text, targetName);
+                return new BoundErrorExpression();
+            }
+        }
+        return operand.Type == target ? operand : BoundConversion.NumericChecked(operand, target);
+    }
+
+    /// `EnumName(intValue)` — an integer to an enum value, the inverse of the
+    /// `byte(enumValue)` native conversion. The argument must be an integral primitive;
+    /// codegen conv's it to the enum's underlying width (an enum is its underlying
+    /// integral at the CLR level, so no boxing or cast is involved).
+    BoundExpression BindEnumFromIntegerConversion(CallExpressionSyntax syntax, EnumType enumTarget)
+    {
+        var operand = BindExpression(syntax.Arguments[0], new PrimitiveType(enumTarget.UnderlyingPrimitiveName));
+        if (operand is BoundErrorExpression) return operand;
+        if (operand.Type is not PrimitiveType { Name: var source } || !IsNumericPrimitive(source))
+        {
+            Diagnostics.Report(syntax.Span, DiagnosticDescriptors.InvalidNumericConversion,
+                $"Cannot convert '{TypeDisplayName(operand.Type)}' to enum '{enumTarget.Name}' — the argument must be an integer.");
+            return new BoundErrorExpression();
+        }
+        return BoundConversion.IntegerToEnum(operand, enumTarget);
+    }
+
+    static object ConvertNumericConstant(object value, string target)
+    {
+        if (target is "float") return Convert.ToSingle(value, System.Globalization.CultureInfo.InvariantCulture);
+        if (target is "double") return Convert.ToDouble(value, System.Globalization.CultureInfo.InvariantCulture);
+        if (target is "decimal") return Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture);
+
+        decimal integral = value switch
+        {
+            float f when !float.IsFinite(f) => throw new OverflowException(),
+            double d when !double.IsFinite(d) => throw new OverflowException(),
+            float f => decimal.Truncate(checked((decimal)f)),
+            double d => decimal.Truncate(checked((decimal)d)),
+            decimal d => decimal.Truncate(d),
+            _ => Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture),
+        };
+        return target switch
+        {
+            "byte" => checked((byte)integral),
+            "sbyte" => checked((sbyte)integral),
+            "short" => checked((short)integral),
+            "ushort" => checked((ushort)integral),
+            "int" => checked((int)integral),
+            "uint" => checked((uint)integral),
+            "long" => checked((long)integral),
+            "ulong" => checked((ulong)integral),
+            "nint" => checked((nint)(long)integral),
+            "nuint" => checked((nuint)(ulong)integral),
+            "char" => checked((char)(ushort)integral),
+            _ => throw new InvalidCastException(),
+        };
+    }
+
     /// Wrap an uncolored async function's declared (unwrapped) result into the awaitable its
     /// stub returns — `ValueTask<T>`, or bare `ValueTask` for a void-like result. Mirrors
     /// <c>AsyncLowering.WrapReturnType</c> for the default (ValueTask) shape so the call-site
@@ -1962,6 +2480,48 @@ internal sealed class ExpressionBinder : BinderUnit
     /// declaring type's parameter names with the receiver's `TypeArgs`, and substitutes —
     /// so `get` on `Box<Box<int>>` (`-> T`) returns the closed `Box<int>`. A non-generic
     /// receiver (or an arity/name mismatch) leaves the type untouched.
+    /// The declared return type of the method `ma.MemberName` resolved on the
+    /// RECEIVER's own type — its member set, walked through the inheritance chain,
+    /// exactly the surface `IsKnownDataMember` checks. This is the call-path
+    /// counterpart of member-access field resolution and honors the method-only
+    /// attachment rule (functions/methods.md): a method is resolved against the
+    /// receiver type, never the module-wide bare-name function table. A receiver
+    /// with no user TypeSymbol (a BCL/external type) yields null, so a call like
+    /// `stream.Read(span)` falls through to reflection-based inference instead of
+    /// binding a same-named E# method's return (`ModelFile.Read -> SectionReader`).
+    /// Overloads are keyed by arity + names (functions/calls.md): among same-named
+    /// candidates on one type, an arity-exact match wins; the receiver may or may
+    /// not occupy a leading parameter slot, so both `args.Count` and `args.Count + 1`
+    /// count as exact before falling back to the first same-named method.
+    BoundType? ReceiverMethodReturn(BoundMemberAccessExpression ma, IReadOnlyList<BoundExpression> args)
+    {
+        var recv = ma.Target.Type switch
+        {
+            HeapPointerBoundType hp => hp.Inner,
+            ByRefBoundType br => br.Inner,
+            var t => t,
+        };
+        var sym = recv switch
+        {
+            DataType d => SymbolOf(d),
+            ChoiceType c => c.Symbol,
+            EnumType e => e.Symbol,
+            _ => null,
+        };
+        if (sym is null) return null;
+
+        for (var cursor = sym; cursor is not null; cursor = cursor.BaseType)
+        {
+            var named = cursor.Members.Where(m => m.Name == ma.MemberName).ToList();
+            if (named.Count == 0) continue;
+            var match = named.FirstOrDefault(m => m.DeclaredArity == args.Count || m.DeclaredArity == args.Count + 1)
+                        ?? named[0];
+            if (match.ReturnType is { } rt)
+                return SubstituteReceiverTypeArgs(rt, ma.Target.Type);
+        }
+        return null;
+    }
+
     BoundType SubstituteReceiverTypeArgs(BoundType returnType, BoundType receiverType)
     {
         var recv = receiverType switch
@@ -2209,7 +2769,7 @@ internal sealed class ExpressionBinder : BinderUnit
             // `Wrap<U>` becomes the user `DataType Wrap<string>` (member resolution
             // works on it), never an ExternalType shell.
             GenericTypeSyntax g => Types.InstantiateGeneric(g.Name, g.Args.Select(Walk).ToList()),
-            TupleTypeSyntax tup => new TupleType(tup.Elements.Select(Walk).ToList()),
+            TupleTypeSyntax tup => new TupleType(tup.Elements.Select(Walk).ToList()) { ElementNames = tup.ElementNames },
             FunctionPointerTypeSyntax f => new FunctionPointerType(f.ParameterTypes.Select(Walk).ToList(), Walk(f.ReturnType)),
             PointerTypeSyntax p => new ByRefBoundType(Walk(p.Inner)),
             NullableTypeSyntax nu => new NullableType(Walk(nu.Inner)),
@@ -2306,8 +2866,35 @@ internal sealed class ExpressionBinder : BinderUnit
     BoundType? PeekArgType(ExpressionSyntax arg) => arg switch
     {
         NameExpressionSyntax n => Scope.Lookup(n.Name),
+        LiteralExpressionSyntax { Value: NumericLiteralValue numeric } => PeekNumericLiteralType(numeric.Text),
+        ParenthesizedExpressionSyntax p => PeekArgType(p.Expression),
+        UnaryExpressionSyntax u => PeekArgType(u.Operand),
+        BinaryExpressionSyntax b when PeekArgType(b.Left) is { } left
+                                      && PeekArgType(b.Right) is { } right
+                                      && TypeDisplayName(left) == TypeDisplayName(right) => left,
         _ => null,
     };
+
+    static BoundType? PeekNumericLiteralType(string raw)
+    {
+        if (Esharp.Syntax.Lexing.NumericLiteralFacts.IsRadixInteger(raw))
+            return Esharp.Syntax.Lexing.NumericLiteralFacts.TryDecodeRadixInteger(raw, out var m)
+                ? new PrimitiveType(Esharp.Syntax.Lexing.NumericLiteralFacts.InferIntegerType(m))
+                : null;
+        var text = raw.Replace("_", "", StringComparison.Ordinal);
+        if (text.Contains('.') || text.Contains('e') || text.Contains('E'))
+            return new PrimitiveType("double");
+        if (int.TryParse(text, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out _))
+            return new PrimitiveType("int");
+        if (long.TryParse(text, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out _))
+            return new PrimitiveType("long");
+        if (ulong.TryParse(text, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out _))
+            return new PrimitiveType("ulong");
+        return null;
+    }
 
     /// Type-level counterpart of InferTypeParamsFromArg, for the pre-binding phase where
     /// only an argument's resolved TYPE is known (not a bound expression): a bare type
@@ -2426,7 +3013,8 @@ internal sealed class ExpressionBinder : BinderUnit
         if (explicitTypeArgs is { Count: > 0 })
             methods = methods.Where(m => !m.IsGenericMethodDefinition || m.GetGenericArguments().Length == explicitTypeArgs.Count);
         var method = methods
-            .OrderBy(m => m.GetParameters().Length)
+            .OrderByDescending(m => OverloadPrebindScore(m, args))
+            .ThenBy(m => m.GetParameters().Length)
             .ThenBy(m => RequiredParameterCount(m))
             .FirstOrDefault();
 
@@ -2495,6 +3083,34 @@ internal sealed class ExpressionBinder : BinderUnit
         return parameters.Skip(offset).Take(args.Count)
             .Select(p => MapRuntimeTypeToBoundType(p.ParameterType.IsByRef ? p.ParameterType.GetElementType()! : p.ParameterType))
             .ToArray();
+    }
+
+    int OverloadPrebindScore(System.Reflection.MethodInfo method, IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        var parameters = method.GetParameters();
+        var offset = method.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false) ? 1 : 0;
+        var score = 0;
+        for (var i = 0; i < arguments.Count && i + offset < parameters.Length; i++)
+        {
+            if (PeekArgType(arguments[i]) is not PrimitiveType primitive) continue;
+            var parameterType = parameters[i + offset].ParameterType;
+            if (parameterType.IsByRef) parameterType = parameterType.GetElementType()!;
+            var expected = parameterType == typeof(int) ? "int"
+                : parameterType == typeof(long) ? "long"
+                : parameterType == typeof(ulong) ? "ulong"
+                : parameterType == typeof(float) ? "float"
+                : parameterType == typeof(double) ? "double"
+                : parameterType == typeof(decimal) ? "decimal"
+                : parameterType == typeof(short) ? "short"
+                : parameterType == typeof(ushort) ? "ushort"
+                : parameterType == typeof(byte) ? "byte"
+                : parameterType == typeof(sbyte) ? "sbyte"
+                : parameterType == typeof(uint) ? "uint"
+                : parameterType == typeof(char) ? "char"
+                : null;
+            if (expected == primitive.Name) score += 100;
+        }
+        return score;
     }
 
     // Close a generic extension-method definition for return-type inference. Explicit
@@ -3010,6 +3626,9 @@ internal sealed class ExpressionBinder : BinderUnit
             .FirstOrDefault();
         if (method is null) return null;
 
+        // The callee runtime type is already closed over the receiver's generic arguments
+        // (`Dictionary<string, byte[]>`), so its out parameter is the concrete closed type
+        // (`out V` → `byte[]`) — map it directly.
         var parameters = method.GetParameters();
         var result = new BoundType[args.Count];
         for (var i = 0; i < args.Count; i++)
@@ -3127,6 +3746,12 @@ internal sealed class ExpressionBinder : BinderUnit
         // Detect captured variables: names referenced in body that resolve from an ancestor scope
         var captures = new List<BoundCapturedVariable>();
         CollectCaptures(body, literalScope, captures);
+        foreach (var capture in captures.Where(c => IsByRefLike(c.Type)))
+            Diagnostics.Report(syntax.Span, DiagnosticDescriptors.ByRefLikeCapture,
+                capture.Name, TypeDisplayName(capture.Type));
+        if (Data.ShowAllocations && captures.Count > 0)
+            Diagnostics.Warn(syntax.Span, DiagnosticDescriptors.ClosureAllocation,
+                string.Join(", ", captures.Select(c => c.Name)));
 
         Scope = prevScope;
 
@@ -3253,6 +3878,10 @@ internal sealed class ExpressionBinder : BinderUnit
                 break;
             case BoundMemberAccessExpression ma:
                 CollectCapturesExpr(ma.Target, literalScope, captures);
+                break;
+            case BoundIndexExpression index:
+                CollectCapturesExpr(index.Target, literalScope, captures);
+                CollectCapturesExpr(index.Index, literalScope, captures);
                 break;
             case BoundAddressOfVariableExpression address:
                 // Address-taking is still a use of the addressed binding. Without
@@ -3523,6 +4152,33 @@ internal sealed class ExpressionBinder : BinderUnit
         }
     }
 
+    /// How many of a method's parameters carry a constructed-generic type whose open
+    /// definition (`ReadOnlySpan`1`) matches the corresponding argument's bound generic
+    /// type — the discriminator between overloads that differ only by which constructed
+    /// generic they accept (`Span<T>` vs `ReadOnlySpan<T>`). Used as an argument-shape
+    /// fallback when a generic overload can't be closed to runtime types.
+    static int ArgGenericDefMatchCount(System.Reflection.MethodInfo m, IReadOnlyList<BoundExpression> args)
+    {
+        static string? ParamDefName(Type t) =>
+            t.IsGenericType ? StripArity(t.GetGenericTypeDefinition().Name) : null;
+        static string StripArity(string n)
+        {
+            var tick = n.IndexOf('`');
+            return tick < 0 ? n : n[..tick];
+        }
+        static string? ArgDefName(BoundType t) => t switch
+        {
+            ExternalType ext when ext.TypeArgs.Count > 0 => ext.Name,
+            _ => null,
+        };
+        var ps = m.GetParameters();
+        var score = 0;
+        for (var i = 0; i < ps.Length && i < args.Count; i++)
+            if (ParamDefName(ps[i].ParameterType) is { } d && d == ArgDefName(args[i].Type))
+                score++;
+        return score;
+    }
+
     BoundType? TryInferMemberCallReturnType(BoundMemberAccessExpression call, IReadOnlyList<BoundExpression> args, IReadOnlyList<BoundType>? explicitTypeArgs = null, SourceSpan useSpan = default)
     {
         // The receiver of the call is `call.Target` — for `nums.Sum()`, that's the `nums`
@@ -3665,7 +4321,18 @@ internal sealed class ExpressionBinder : BinderUnit
             .OrderByDescending(c => c.Score)
             .ThenByDescending(c => c.Specificity)
             .ToList();
-        var best = candidates.Count > 0 ? candidates[0].Method : methods[0];
+        // Fallback when no candidate could close (a generic method whose type
+        // parameter is the enclosing function's own `T`, which has no runtime
+        // Type — e.g. `MemoryMarshal.Cast<T, byte>(v)` inside `writeArray<T>`).
+        // methods[0] alone ignores the argument shape, so a `ReadOnlySpan<T>`
+        // arg binds to the first-declared `Span<T>` overload — the binder then
+        // types the call `Span<byte>` while codegen emits `ReadOnlySpan<byte>`,
+        // and the disagreement injects a bogus span conversion. Rank the raw
+        // methods by how many parameters' open generic definition matches the
+        // corresponding argument's, so the ReadOnlySpan overload wins.
+        var best = candidates.Count > 0
+            ? candidates[0].Method
+            : methods.OrderByDescending(m => ArgGenericDefMatchCount(m, args)).First();
         ReportExternalMethodUse(best, useSpan);
         if (best.ReturnType == typeof(void)) return new VoidType();
 

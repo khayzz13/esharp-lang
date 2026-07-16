@@ -50,7 +50,12 @@ sealed class OperatorScanner : LexUnit
                 if (Current == '?') { Advance(); return Tok(SyntaxTokenKind.QuestionQuestion, "??"); }
                 if (Current == '.') { Advance(); return Tok(SyntaxTokenKind.QuestionDot, "?."); }
                 return Tok(SyntaxTokenKind.Question, "?");
-            case '^': Advance(); return Tok(SyntaxTokenKind.Caret, "^");
+            case '^':
+                Advance();
+                if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.CaretEquals, "^="); }
+                return Tok(SyntaxTokenKind.Caret, "^");
+            case '~': Advance(); return Tok(SyntaxTokenKind.Tilde, "~");
+            case '@': Advance(); return Tok(SyntaxTokenKind.At, "@");
             case '+':
                 Advance();
                 if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.PlusEquals, "+="); }
@@ -63,7 +68,10 @@ sealed class OperatorScanner : LexUnit
                 Advance();
                 if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.SlashEquals, "/="); }
                 return Tok(SyntaxTokenKind.Slash, "/");
-            case '%': Advance(); return Tok(SyntaxTokenKind.Percent, "%");
+            case '%':
+                Advance();
+                if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.PercentEquals, "%="); }
+                return Tok(SyntaxTokenKind.Percent, "%");
             case '!':
                 Advance();
                 if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.BangEquals, "!="); }
@@ -80,20 +88,40 @@ sealed class OperatorScanner : LexUnit
                 return Tok(SyntaxTokenKind.Minus, "-");
             case '<':
                 Advance();
+                if (Current == '<')
+                {
+                    Advance();
+                    if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.ShiftLeftEquals, "<<="); }
+                    return Tok(SyntaxTokenKind.ShiftLeft, "<<");
+                }
                 if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.LessEquals, "<="); }
                 return Tok(SyntaxTokenKind.Less, "<");
             case '>':
                 Advance();
+                if (Current == '>')
+                {
+                    Advance();
+                    if (Current == '>')
+                    {
+                        Advance();
+                        if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.UnsignedShiftRightEquals, ">>>="); }
+                        return Tok(SyntaxTokenKind.UnsignedShiftRight, ">>>");
+                    }
+                    if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.ShiftRightEquals, ">>="); }
+                    return Tok(SyntaxTokenKind.ShiftRight, ">>");
+                }
                 if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.GreaterEquals, ">="); }
                 return Tok(SyntaxTokenKind.Greater, ">");
             case '&':
                 Advance();
                 if (Current == '&') { Advance(); return Tok(SyntaxTokenKind.AmpAmp, "&&"); }
+                if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.AmpersandEquals, "&="); }
                 return Tok(SyntaxTokenKind.Ampersand, "&");
             case '|':
                 Advance();
                 if (Current == '|') { Advance(); return Tok(SyntaxTokenKind.PipePipe, "||"); }
-                break;
+                if (Current == '=') { Advance(); return Tok(SyntaxTokenKind.PipeEquals, "|="); }
+                return Tok(SyntaxTokenKind.Pipe, "|");
         }
 
         Report(line, col, $"Unexpected character '{Current}'.");

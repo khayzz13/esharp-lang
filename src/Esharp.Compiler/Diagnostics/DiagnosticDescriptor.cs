@@ -48,7 +48,7 @@ namespace Esharp.Diagnostics;
 /// </param>
 /// <param name="HelpLink">
 ///   Optional URL to a docs page, e.g.
-///   <c>"https://docs.esharp.dev/diagnostics/ES2160"</c>. Surfaced as a
+///   <c>"https://esharp-lang.vercel.app/diagnostics/ES2160"</c>. Surfaced as a
 ///   clickable link in the LSP hover for the diagnostic.
 /// </param>
 /// <param name="Fixit">

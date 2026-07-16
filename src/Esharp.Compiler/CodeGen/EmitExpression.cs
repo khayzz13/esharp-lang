@@ -3,6 +3,7 @@ using Mono.Cecil.Cil;
 using Esharp.Emit;
 using Esharp.BoundTree;
 using Esharp.BoundTree;
+using ILOpCode = System.Reflection.Metadata.ILOpCode;
 
 namespace Esharp.CodeGen;
 
@@ -86,6 +87,25 @@ public partial class MethodBodyEmitter
                 // the closed instance, matching what the three inline store-paths do.
                 EmitExpression(conv.Operand);
                 _il.NewObj(NullableCtor(_types.Resolve(conv.TargetType)));
+                break;
+
+            case ConversionKind.NumericChecked:
+                EmitNumericCheckedConversion(conv);
+                break;
+
+            case ConversionKind.ImplicitSpan:
+                // BCL implicit span conversion: emit the operand (array / Span<T>),
+                // then `call` the framework op_Implicit closed on the target span.
+                EmitExpression(conv.Operand);
+                EmitSpanImplicit(conv.Operand.Type, conv.TargetType);
+                break;
+
+            case ConversionKind.IntegerToEnum:
+                // integer → enum: push the integer and narrow to the enum's underlying
+                // width (unchecked, like a C# `(Enum)i`). An enum has no runtime shape
+                // distinct from its underlying integral, so the value then IS the enum.
+                EmitExpression(conv.Operand);
+                EmitIntegerNarrow(((EnumType)conv.TargetType).UnderlyingPrimitiveName);
                 break;
 
             default:
@@ -182,6 +202,102 @@ public partial class MethodBodyEmitter
             _il.UnboxAny(targetRef);
         else
             _il.CastClass(targetRef);
+    }
+
+    void EmitNumericCheckedConversion(BoundConversion conv)
+    {
+        if (conv.Operand.Type == conv.TargetType)
+        {
+            EmitExpression(conv.Operand);
+            return;
+        }
+
+        if (conv.Operand.Type is PrimitiveType { Name: "decimal" }
+            || conv.TargetType is PrimitiveType { Name: "decimal" })
+        {
+            EmitDecimalConversion(conv);
+            return;
+        }
+
+        EmitExpression(conv.Operand);
+        // An enum operand's stack value is its underlying integral, so classify its
+        // signedness by that underlying type (`enum C: byte` → unsigned source).
+        var sourceName = conv.Operand.Type switch
+        {
+            PrimitiveType p => p.Name,
+            EnumType e => e.UnderlyingPrimitiveName,
+            _ => null,
+        };
+        var sourceUnsigned = sourceName is "byte" or "ushort" or "uint" or "ulong" or "nuint" or "char";
+        var sourceFloat = sourceName is "float" or "double";
+        var target = ((PrimitiveType)conv.TargetType).Name;
+        if (target is "float" or "double")
+        {
+            if (sourceUnsigned) _il.Convert(ILOpCode.Conv_r_un);
+            if (target == "float") _il.Convert(ILOpCode.Conv_r4);
+            else if (!sourceUnsigned) _il.Convert(ILOpCode.Conv_r8);
+            return;
+        }
+        var op = (target, sourceUnsigned && !sourceFloat) switch
+        {
+            ("sbyte", false) => ILOpCode.Conv_ovf_i1,
+            ("sbyte", true) => ILOpCode.Conv_ovf_i1_un,
+            ("byte", false) => ILOpCode.Conv_ovf_u1,
+            ("byte", true) => ILOpCode.Conv_ovf_u1_un,
+            ("short", false) => ILOpCode.Conv_ovf_i2,
+            ("short", true) => ILOpCode.Conv_ovf_i2_un,
+            ("ushort" or "char", false) => ILOpCode.Conv_ovf_u2,
+            ("ushort" or "char", true) => ILOpCode.Conv_ovf_u2_un,
+            ("int", false) => ILOpCode.Conv_ovf_i4,
+            ("int", true) => ILOpCode.Conv_ovf_i4_un,
+            ("uint", false) => ILOpCode.Conv_ovf_u4,
+            ("uint", true) => ILOpCode.Conv_ovf_u4_un,
+            ("long", false) => ILOpCode.Conv_ovf_i8,
+            ("long", true) => ILOpCode.Conv_ovf_i8_un,
+            ("ulong", false) => ILOpCode.Conv_ovf_u8,
+            ("ulong", true) => ILOpCode.Conv_ovf_u8_un,
+            ("nint", false) => ILOpCode.Conv_ovf_i,
+            ("nint", true) => ILOpCode.Conv_ovf_i_un,
+            ("nuint", false) => ILOpCode.Conv_ovf_u,
+            ("nuint", true) => ILOpCode.Conv_ovf_u_un,
+            _ => ILOpCode.Conv_i4,
+        };
+        _il.Convert(op);
+    }
+
+    /// Unchecked narrowing `conv` to an integral primitive's width — the truncating
+    /// form a C# enum cast uses. `int` needs none (values sit as int32 on the stack).
+    void EmitIntegerNarrow(string primitiveName)
+    {
+        ILOpCode? op = primitiveName switch
+        {
+            "byte" => ILOpCode.Conv_u1,
+            "sbyte" => ILOpCode.Conv_i1,
+            "short" => ILOpCode.Conv_i2,
+            "ushort" or "char" => ILOpCode.Conv_u2,
+            "uint" => ILOpCode.Conv_u4,
+            "long" => ILOpCode.Conv_i8,
+            "ulong" => ILOpCode.Conv_u8,
+            "nint" => ILOpCode.Conv_i,
+            "nuint" => ILOpCode.Conv_u,
+            _ => null,   // int (or unknown): already int32 on the stack
+        };
+        if (op is { } o) _il.Convert(o);
+    }
+
+    void EmitDecimalConversion(BoundConversion conv)
+    {
+        var source = _types.BoundTypeToRuntime(conv.Operand.Type)
+            ?? throw new InvalidOperationException("numeric conversion source has no CLR type");
+        var target = _types.BoundTypeToRuntime(conv.TargetType)
+            ?? throw new InvalidOperationException("numeric conversion target has no CLR type");
+        var method = typeof(decimal).GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .FirstOrDefault(m => (m.Name is "op_Implicit" or "op_Explicit")
+                && m.ReturnType == target && m.GetParameters() is var ps && ps.Length == 1 && ps[0].ParameterType == source);
+        if (method is null)
+            throw new InvalidOperationException($"no decimal conversion from {source} to {target}");
+        EmitExpression(conv.Operand);
+        _il.Call(_types.Module.ImportReference(method));
     }
 
     // =========================================================================

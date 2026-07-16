@@ -432,11 +432,15 @@ sealed class ExpressionParser : ParserUnit
                     while (depth > 0 && Current.Kind != SyntaxTokenKind.EndOfFile && Current.Kind != SyntaxTokenKind.NewLine)
                     {
                         if (Current.Kind == SyntaxTokenKind.Less) depth++;
-                        else if (Current.Kind == SyntaxTokenKind.Greater) { depth--; if (depth == 0) break; }
+                        else if (GreaterWidth(Current.Kind) is var width && width > 0)
+                        {
+                            depth -= width;
+                            if (depth <= 0) break;
+                        }
                         NextToken();
                     }
 
-                    if (depth == 0 && Current.Kind == SyntaxTokenKind.Greater)
+                    if (depth <= 0 && GreaterWidth(Current.Kind) > 0)
                     {
                         NextToken(); // consume >
                         // The angle group as source text — the `(` / `.` cases still target
@@ -526,7 +530,11 @@ sealed class ExpressionParser : ParserUnit
         {
             var kind = Current.Kind;
             if (kind == SyntaxTokenKind.Less) depth++;
-            else if (kind == SyntaxTokenKind.Greater) { depth--; if (depth == 0) break; }
+            else if (GreaterWidth(kind) is var width && width > 0)
+            {
+                depth -= width;
+                if (depth <= 0) break;
+            }
             else if (kind is SyntaxTokenKind.EndOfFile or SyntaxTokenKind.NewLine or SyntaxTokenKind.OpenBrace or SyntaxTokenKind.CloseParen or SyntaxTokenKind.OpenParen)
             {
                 Cursor.Restore(saved);
@@ -540,7 +548,7 @@ sealed class ExpressionParser : ParserUnit
             NextToken();
         }
 
-        if (Current.Kind != SyntaxTokenKind.Greater)
+        if (GreaterWidth(Current.Kind) == 0)
         {
             Cursor.Restore(saved);
             return (null, false);
@@ -560,6 +568,14 @@ sealed class ExpressionParser : ParserUnit
         var args = Types.ParseTypeArguments();
         return (args, true);
     }
+
+    static int GreaterWidth(SyntaxTokenKind kind) => kind switch
+    {
+        SyntaxTokenKind.Greater => 1,
+        SyntaxTokenKind.ShiftRight => 2,
+        SyntaxTokenKind.UnsignedShiftRight => 3,
+        _ => 0,
+    };
 
     static bool CanAppearInMethodTypeArgumentList(SyntaxTokenKind kind) => kind is
         SyntaxTokenKind.Identifier or
@@ -685,12 +701,27 @@ sealed class ExpressionParser : ParserUnit
             return new NewExpressionSyntax(created);
         }
 
+        // Contextual `stackalloc` — a frame-local buffer. Recognized only immediately
+        // before an element type name and `[` (the `T[](n)` construction form); an
+        // ordinary identifier everywhere else. Yields a `Span<T>`, never a `*T`.
+        if (Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "stackalloc"
+            && Peek(1).Kind == SyntaxTokenKind.Identifier && Peek(2).Kind == SyntaxTokenKind.OpenBracket)
+        {
+            NextToken(); // consume `stackalloc`
+            var alloc = ParsePostfixExpression();
+            if (alloc is ArrayCreationExpressionSyntax arr)
+                return new StackAllocExpressionSyntax(arr.ElementType, arr.Size);
+            Report(Current.Line, Current.Column,
+                "`stackalloc` must be followed by an array construction `T[](n)`.");
+            return alloc;
+        }
+
         switch (Current.Kind)
         {
             case SyntaxTokenKind.NumberLiteral:
             {
                 var numberToken = NextToken();
-                return new LiteralExpressionSyntax(ParseNumber(numberToken), PreviousText());
+                return new LiteralExpressionSyntax(new NumericLiteralValue(numberToken.Text), PreviousText());
             }
             case SyntaxTokenKind.StringLiteral:
             {
@@ -700,6 +731,14 @@ sealed class ExpressionParser : ParserUnit
                 return new LiteralExpressionSyntax(template, PreviousText())
                 {
                     SuppressInterpolation = !StringLiteralLowering.Interpolates(form),
+                };
+            }
+            case SyntaxTokenKind.ByteStringLiteral:
+            {
+                var raw = NextToken().Text;
+                return new LiteralExpressionSyntax(DecodeByteString(raw), PreviousText())
+                {
+                    SuppressInterpolation = true,
                 };
             }
             case SyntaxTokenKind.CharLiteral:
@@ -812,32 +851,37 @@ sealed class ExpressionParser : ParserUnit
     {
         Match(SyntaxTokenKind.OpenBracket);
 
-        // [..end]
+        // [..end] / [..^end] / [..]
         if (Current.Kind == SyntaxTokenKind.DotDot)
         {
             NextToken();
-            var end = Current.Kind == SyntaxTokenKind.CloseBracket ? null : ParseExpression();
+            var end = Current.Kind == SyntaxTokenKind.CloseBracket ? null : ParseRangeEndpoint();
             Match(SyntaxTokenKind.CloseBracket, "Expected ']'.");
             return new RangeExpressionSyntax(target, null, end);
         }
 
-        // [^expr]
+        // [^k] — an index-from-end that is a whole index, or the start of a `^k..` range.
         if (Current.Kind == SyntaxTokenKind.Caret)
         {
-            NextToken();
-            var index = ParseExpression();
+            var fromEndStart = ParseRangeEndpoint();
+            if (Current.Kind == SyntaxTokenKind.DotDot)
+            {
+                NextToken();
+                var end = Current.Kind == SyntaxTokenKind.CloseBracket ? null : ParseRangeEndpoint();
+                Match(SyntaxTokenKind.CloseBracket, "Expected ']'.");
+                return new RangeExpressionSyntax(target, fromEndStart, end);
+            }
             Match(SyntaxTokenKind.CloseBracket, "Expected ']'.");
-            // Wrap in a unary ^ node — we'll emit as ^expr
-            return new IndexExpressionSyntax(target, new UnaryExpressionSyntax(SyntaxTokenKind.Caret, index));
+            return new IndexExpressionSyntax(target, fromEndStart);
         }
 
         var expr = ParseExpression();
 
-        // [start..end] or [start..]
+        // [start..end] / [start..^end] / [start..]
         if (Current.Kind == SyntaxTokenKind.DotDot)
         {
             NextToken();
-            var end = Current.Kind == SyntaxTokenKind.CloseBracket ? null : ParseExpression();
+            var end = Current.Kind == SyntaxTokenKind.CloseBracket ? null : ParseRangeEndpoint();
             Match(SyntaxTokenKind.CloseBracket, "Expected ']'.");
             return new RangeExpressionSyntax(target, expr, end);
         }
@@ -847,11 +891,41 @@ sealed class ExpressionParser : ParserUnit
         return new IndexExpressionSyntax(target, expr);
     }
 
+    // A range endpoint (or a whole from-end index): `expr`, or `^expr` for index-from-end.
+    ExpressionSyntax ParseRangeEndpoint()
+    {
+        if (Current.Kind == SyntaxTokenKind.Caret)
+        {
+            NextToken();
+            return new UnaryExpressionSyntax(SyntaxTokenKind.Caret, ParseExpression());
+        }
+        return ParseExpression();
+    }
+
     string PreviousText() => Cursor.TokenAt(Cursor.Position - 1).Text;
 
     object ParseNumber(SyntaxToken token)
     {
         var rawText = token.Text;
+
+        // Radix integer (0x / 0b): decode to a magnitude and pick the smallest of
+        // int/long/ulong that holds it (the decimal widening order, by value).
+        if (Lexing.NumericLiteralFacts.IsRadixInteger(rawText))
+        {
+            if (Lexing.NumericLiteralFacts.TryDecodeRadixInteger(rawText, out var mag))
+            {
+                return Lexing.NumericLiteralFacts.InferIntegerType(mag) switch
+                {
+                    "int" => (int)mag,
+                    "long" => (long)mag,
+                    _ => mag,
+                };
+            }
+            Report(token.Line, token.Column,
+                $"Integer literal '{rawText}' is out of range (exceeds the maximum 64-bit unsigned value {ulong.MaxValue}).");
+            return 0;
+        }
+
         // Strip digit-group separators (1_000_000 -> 1000000) before parsing.
         var text = rawText.Replace("_", "");
         // A fraction (`.`) or an exponent (`e`/`E`, e.g. 1e10, 2E8) makes it a double.
@@ -881,6 +955,55 @@ sealed class ExpressionParser : ParserUnit
             $"Integer literal '{rawText}' is out of range (exceeds the maximum 64-bit unsigned value {ulong.MaxValue}).");
         return 0;
     }
+
+    /// Decode a `b"…"` byte-string lexeme to its bytes. A normal character contributes
+    /// its UTF-8 encoding; a `\xNN` escape contributes the raw byte NN (byte-exact, the
+    /// point of the form); the C-family escapes (`\n`, `\t`, `\0`, `\\`, `\"`, …) and
+    /// `\uNNNN` (UTF-8 of the code point) behave as in a string literal.
+    static byte[] DecodeByteString(string lexeme)
+    {
+        // Strip the `b"` prefix and the closing `"` (tolerate an unterminated lexeme).
+        var inner = lexeme.Length >= 3 ? lexeme[2..^1] : "";
+        var bytes = new List<byte>(inner.Length);
+        for (var i = 0; i < inner.Length; i++)
+        {
+            var ch = inner[i];
+            if (ch != '\\') { AppendUtf8(bytes, ch); continue; }
+            if (++i >= inner.Length) break;
+            switch (inner[i])
+            {
+                case 'n': bytes.Add((byte)'\n'); break;
+                case 'r': bytes.Add((byte)'\r'); break;
+                case 't': bytes.Add((byte)'\t'); break;
+                case '0': bytes.Add(0); break;
+                case 'b': bytes.Add((byte)'\b'); break;
+                case 'f': bytes.Add((byte)'\f'); break;
+                case 'v': bytes.Add((byte)'\v'); break;
+                case 'a': bytes.Add((byte)'\a'); break;
+                case '\\': bytes.Add((byte)'\\'); break;
+                case '"': bytes.Add((byte)'"'); break;
+                case '\'': bytes.Add((byte)'\''); break;
+                case 'x':
+                {
+                    // 1–2 hex digits → one raw byte.
+                    var val = 0; var n = 0;
+                    while (n < 2 && i + 1 < inner.Length && Uri.IsHexDigit(inner[i + 1]))
+                    { val = val * 16 + Convert.ToInt32(inner[i + 1].ToString(), 16); i++; n++; }
+                    if (n == 0) bytes.Add((byte)'x'); else bytes.Add((byte)val);
+                    break;
+                }
+                case 'u' when i + 4 < inner.Length:
+                    AppendUtf8(bytes, (char)Convert.ToInt32(inner.Substring(i + 1, 4), 16));
+                    i += 4;
+                    break;
+                default: AppendUtf8(bytes, inner[i]); break;
+            }
+        }
+        return bytes.ToArray();
+    }
+
+    static void AppendUtf8(List<byte> bytes, char ch) =>
+        bytes.AddRange(System.Text.Encoding.UTF8.GetBytes([ch]));
 
     static char ParseChar(string text)
     {

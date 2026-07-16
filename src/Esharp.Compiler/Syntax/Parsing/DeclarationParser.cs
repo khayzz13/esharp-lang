@@ -81,6 +81,71 @@ sealed class DeclarationParser : ParserUnit
         return attributes;
     }
 
+    CompilerDirectiveSyntax ParseCompilerDirective()
+    {
+        var start = SpanHere();
+        Match(SyntaxTokenKind.At);
+        var name = Match(SyntaxTokenKind.Identifier,
+            "ES2237: expected a compiler directive name after '@'.");
+        var arguments = new List<CompilerDirectiveArgumentSyntax>();
+        if (Current.Kind == SyntaxTokenKind.OpenParen)
+        {
+            NextToken();
+            while (Current.Kind is not (SyntaxTokenKind.CloseParen or SyntaxTokenKind.EndOfFile))
+            {
+                var argument = Match(SyntaxTokenKind.Identifier,
+                    "ES2237: expected a named compiler directive argument.");
+                if (Current.Kind == SyntaxTokenKind.Colon)
+                    NextToken();
+                else
+                {
+                    Report(Current.Line, Current.Column,
+                        Esharp.Diagnostics.DiagnosticDescriptors.InvalidCompilerDirective,
+                        "Compiler directive arguments use 'name: value' syntax.");
+                    // Recover the common attribute-style typo `name = value`.
+                    if (Current.Kind == SyntaxTokenKind.Equals) NextToken();
+                }
+                bool value;
+                if (Current.Kind == SyntaxTokenKind.TrueKeyword) { value = true; NextToken(); }
+                else if (Current.Kind == SyntaxTokenKind.FalseKeyword) { value = false; NextToken(); }
+                else
+                {
+                    Report(Current.Line, Current.Column,
+                        Esharp.Diagnostics.DiagnosticDescriptors.InvalidCompilerDirective,
+                        "Compiler directive values must be 'true' or 'false'.");
+                    value = false;
+                    if (Current.Kind != SyntaxTokenKind.EndOfFile) NextToken();
+                }
+                arguments.Add(new CompilerDirectiveArgumentSyntax(argument.Text, value)
+                    { Span = SpanOf(argument) });
+                if (Current.Kind == SyntaxTokenKind.Comma) NextToken();
+                else break;
+            }
+            if (Current.Kind == SyntaxTokenKind.CloseParen) NextToken();
+            else Report(Current.Line, Current.Column,
+                Esharp.Diagnostics.DiagnosticDescriptors.InvalidCompilerDirective,
+                "Expected ')' to close compiler directive.");
+        }
+        return new CompilerDirectiveSyntax(name.Text, arguments) { Span = SpanFrom(start) };
+    }
+
+    (List<AttributeSyntax> Attributes, List<CompilerDirectiveSyntax> Directives) ParseDeclarationPrefixes()
+    {
+        var attributes = new List<AttributeSyntax>();
+        var directives = new List<CompilerDirectiveSyntax>();
+        while (Current.Kind is SyntaxTokenKind.OpenBracket or SyntaxTokenKind.At)
+        {
+            if (Current.Kind == SyntaxTokenKind.OpenBracket)
+                attributes.AddRange(ParseAttributeList());
+            else
+            {
+                directives.Add(ParseCompilerDirective());
+                SkipSeparators();
+            }
+        }
+        return (attributes, directives);
+    }
+
     /// A `[Attr]` list parsed in a data body where the following member cannot
     /// carry it — a located error rather than a silent drop.
     void ReportUnattachableAttributes(List<AttributeSyntax>? attributes, string memberForm)
@@ -92,7 +157,7 @@ sealed class DeclarationParser : ParserUnit
 
     MemberSyntax ParseMemberCore()
     {
-        var attributes = ParseAttributeList();
+        var (attributes, directives) = ParseDeclarationPrefixes();
 
         // Parse #derive directive if present — owned by the data declaration that follows.
         DeriveDirectiveSyntax? derive = null;
@@ -135,9 +200,9 @@ sealed class DeclarationParser : ParserUnit
             if (Peek(1).Kind == SyntaxTokenKind.FuncKeyword)
             {
                 NextToken(); // consume `readonly`
-                return ParseFunctionDeclaration(isPublic, attributes: attributes, readonlyReceiver: true);
+                return ParseFunctionDeclaration(isPublic, attributes: attributes, readonlyReceiver: true, directives: directives);
             }
-            return ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive);
+            return ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive, directives);
         }
 
         // Class modifiers: abstract / open precede `class`. A class is otherwise
@@ -147,7 +212,7 @@ sealed class DeclarationParser : ParserUnit
         {
             var modifier = Current.Text == "abstract" ? ClassModifier.Abstract : ClassModifier.Open;
             NextToken(); // consume modifier
-            return ParseDataDeclaration(isPublic, modifier, attributes, derive);
+            return ParseDataDeclaration(isPublic, modifier, attributes, derive, directives);
         }
 
         // ref keyword: only `ref union` remains — the reference-class kind is `class`.
@@ -167,7 +232,7 @@ sealed class DeclarationParser : ParserUnit
 
         // task func name(...) ... — function-shaped spawn
         if ((Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "task") && Peek(1).Kind == SyntaxTokenKind.FuncKeyword)
-            return ParseFunctionDeclaration(isPublic, isTaskFunc: true, attributes: attributes);
+            return ParseFunctionDeclaration(isPublic, isTaskFunc: true, attributes: attributes, directives: directives);
 
         // delegate func Name(...) -> R — nominal delegate type. `delegate` is a
         // contextual keyword (only here, before `func`); it stays a valid identifier
@@ -187,12 +252,12 @@ sealed class DeclarationParser : ParserUnit
 
         return Current.Kind switch
         {
-            SyntaxTokenKind.StructKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive),
-            SyntaxTokenKind.ClassKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive),
+            SyntaxTokenKind.StructKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive, directives),
+            SyntaxTokenKind.ClassKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive, directives),
             SyntaxTokenKind.UnionKeyword => ParseChoiceDeclaration(isPublic),
-            SyntaxTokenKind.FuncKeyword => ParseFunctionDeclaration(isPublic, attributes: attributes),
+            SyntaxTokenKind.FuncKeyword => ParseFunctionDeclaration(isPublic, attributes: attributes, directives: directives),
             SyntaxTokenKind.EnumKeyword => ParseEnumDeclaration(isPublic),
-            SyntaxTokenKind.InterfaceKeyword => ParseInterfaceDeclaration(isPublic),
+            SyntaxTokenKind.InterfaceKeyword => ParseInterfaceDeclaration(isPublic, directives),
             SyntaxTokenKind.ConstKeyword => ParseConstDeclaration(isPublic),
             _ => ReportUnexpectedMember(),
         };
@@ -223,8 +288,6 @@ sealed class DeclarationParser : ParserUnit
         }
         else if (Current.Kind == SyntaxTokenKind.FatArrow)
         {
-            if (mutable)
-                Report(Current.Line, Current.Column, "A computed namespace property uses 'let', not 'var'.");
             if (type is InferredTypeSyntax)
                 Report(Current.Line, Current.Column, "A computed namespace property requires an explicit result type.");
             NextToken();
@@ -303,7 +366,7 @@ sealed class DeclarationParser : ParserUnit
     /// of `ParseMemberCore`, restricted to type-producing declarations. The result is
     /// an ordinary declaration syntax; the binder registers it with declaring-type
     /// context so its CLR identity nests under the enclosing type.
-    MemberSyntax ParseNestedType(List<AttributeSyntax> attributes)
+    MemberSyntax ParseNestedType(List<AttributeSyntax> attributes, List<CompilerDirectiveSyntax>? directives = null)
     {
         DeriveDirectiveSyntax? derive = null;
         if (Current.Kind == SyntaxTokenKind.DeriveKeyword)
@@ -326,14 +389,14 @@ sealed class DeclarationParser : ParserUnit
 
         if (Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "readonly"
             && Peek(1).Kind == SyntaxTokenKind.StructKeyword)
-            return ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive);
+            return ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive, directives);
 
         if (Current.Kind == SyntaxTokenKind.Identifier && Current.Text is "abstract" or "open"
             && Peek(1).Kind == SyntaxTokenKind.ClassKeyword)
         {
             var modifier = Current.Text == "abstract" ? ClassModifier.Abstract : ClassModifier.Open;
             NextToken();
-            return ParseDataDeclaration(isPublic, modifier, attributes, derive);
+            return ParseDataDeclaration(isPublic, modifier, attributes, derive, directives);
         }
 
         if (Current.Kind == SyntaxTokenKind.RefKeyword && Peek(1).Kind == SyntaxTokenKind.UnionKeyword)
@@ -347,11 +410,11 @@ sealed class DeclarationParser : ParserUnit
 
         return Current.Kind switch
         {
-            SyntaxTokenKind.StructKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive),
-            SyntaxTokenKind.ClassKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive),
+            SyntaxTokenKind.StructKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive, directives),
+            SyntaxTokenKind.ClassKeyword => ParseDataDeclaration(isPublic, ClassModifier.Sealed, attributes, derive, directives),
             SyntaxTokenKind.UnionKeyword => ParseChoiceDeclaration(isPublic),
             SyntaxTokenKind.EnumKeyword => ParseEnumDeclaration(isPublic),
-            SyntaxTokenKind.InterfaceKeyword => ParseInterfaceDeclaration(isPublic),
+            SyntaxTokenKind.InterfaceKeyword => ParseInterfaceDeclaration(isPublic, directives),
             _ => ReportUnexpectedMember(),
         };
     }
@@ -386,6 +449,17 @@ sealed class DeclarationParser : ParserUnit
         }
         var nameTok = Match(SyntaxTokenKind.Identifier, "Expected static name.");
         var name = nameTok.Text;
+        var typeParameters = new List<string>();
+        if (Current.Kind == SyntaxTokenKind.Less)
+        {
+            NextToken();
+            while (Current.Kind is not (SyntaxTokenKind.Greater or SyntaxTokenKind.EndOfFile))
+            {
+                typeParameters.Add(Match(SyntaxTokenKind.Identifier, "Expected static-facet type parameter name.").Text);
+                if (Current.Kind == SyntaxTokenKind.Comma) NextToken();
+            }
+            Match(SyntaxTokenKind.Greater, "Expected '>' to close static-facet type parameters.");
+        }
         SkipSeparators();
         Match(SyntaxTokenKind.OpenBrace, "Expected '{' to open static body.");
         SkipSeparators();
@@ -420,12 +494,18 @@ sealed class DeclarationParser : ParserUnit
 
             // Visibility / mutability prefixes for fields
             bool fieldPublic = isPublic;
-            if (Current.Kind == SyntaxTokenKind.PubKeyword) { fieldPublic = true; NextToken(); }
+            var explicitlyPublic = false;
+            if (Current.Kind == SyntaxTokenKind.PubKeyword) { fieldPublic = true; explicitlyPublic = true; NextToken(); }
             else if (Current.Kind == SyntaxTokenKind.PrivKeyword) { fieldPublic = false; NextToken(); }
 
             if (Current.Kind == SyntaxTokenKind.FuncKeyword)
             {
-                functions.Add(ParseFunctionDeclaration(fieldPublic));
+                var function = ParseFunctionDeclaration(fieldPublic);
+                // Operators use explicit visibility: a public companion facet does not
+                // accidentally export every CLR op_* method it contains.
+                if (function.OperatorKind is not null && !explicitlyPublic)
+                    function = function with { IsPublic = false };
+                functions.Add(function);
                 SkipSeparators();
                 continue;
             }
@@ -508,7 +588,7 @@ sealed class DeclarationParser : ParserUnit
         Match(SyntaxTokenKind.CloseBrace, "Expected '}' to close static body.");
         return new StaticFuncDeclarationSyntax(isPublic, name, fields, functions, returns,
             NestedTypes: nestedTypes.Count > 0 ? nestedTypes : null,
-            TypeParameters: []) { NameSpan = SpanOf(nameTok), Visibility = declVisibility };
+            TypeParameters: typeParameters) { NameSpan = SpanOf(nameTok), Visibility = declVisibility };
     }
 
     MemberSyntax ReportUnexpectedMember()
@@ -519,7 +599,7 @@ sealed class DeclarationParser : ParserUnit
         return new ErrorMemberSyntax { Span = SpanFrom(span) };
     }
 
-    DataDeclarationSyntax ParseDataDeclaration(bool isPublic, ClassModifier modifier, List<AttributeSyntax> attributes, DeriveDirectiveSyntax? derive)
+    DataDeclarationSyntax ParseDataDeclaration(bool isPublic, ClassModifier modifier, List<AttributeSyntax> attributes, DeriveDirectiveSyntax? derive, List<CompilerDirectiveSyntax>? directives = null)
     {
         // Capture before the body parse, which may re-enter for a nested type and
         // overwrite the shared visibility field.
@@ -541,18 +621,8 @@ sealed class DeclarationParser : ParserUnit
         var nameTok = Match(SyntaxTokenKind.Identifier, isRef ? "Expected class name." : "Expected data type name.");
         var name = nameTok.Text;
 
-        // Optional type parameters: data Pair<A, B> { ... }
-        var typeParameters = new List<string>();
-        if (Current.Kind == SyntaxTokenKind.Less)
-        {
-            NextToken();
-            while (Current.Kind is not (SyntaxTokenKind.Greater or SyntaxTokenKind.EndOfFile))
-            {
-                typeParameters.Add(Match(SyntaxTokenKind.Identifier, "Expected type parameter name.").Text);
-                if (Current.Kind == SyntaxTokenKind.Comma) NextToken();
-            }
-            Match(SyntaxTokenKind.Greater, "Expected '>' to close type parameter list.");
-        }
+        // Optional type parameters: data Pair<A, B> { ... }, data Bytes<T: unmanaged> { ... }
+        var typeParameters = ParseTypeParameterList(out var typeParameterConstraints);
 
         // Optional interface list: data Foo : IBar, IBaz { ... }
         var interfaces = new List<TypeSyntax>();
@@ -614,7 +684,7 @@ sealed class DeclarationParser : ParserUnit
                 var initBody = new BlockStatementSyntax(initStatements);
                 var posInitDecl = new InitDeclarationSyntax(initParams, initBody);
 
-                return new DataDeclarationSyntax(isRef, isPublic, isReadonly, name, typeParameters, interfaces, positionalFields, attributes, new[] { posInitDecl }, null, null, modifier, derive?.Traits, IsPositional: true) { NameSpan = SpanOf(nameTok), Visibility = declVisibility };
+                return ApplyCompilerDirectives(new DataDeclarationSyntax(isRef, isPublic, isReadonly, name, typeParameters, interfaces, positionalFields, attributes, new[] { posInitDecl }, null, null, modifier, derive?.Traits, IsPositional: true) { NameSpan = SpanOf(nameTok), Visibility = declVisibility, GenericConstraints = typeParameterConstraints }, directives);
             }
 
             headerParams = initParams;
@@ -634,7 +704,7 @@ sealed class DeclarationParser : ParserUnit
             SkipSeparators();
             // A headered class may omit the body entirely.
             if (Current.Kind != SyntaxTokenKind.OpenBrace)
-                return new DataDeclarationSyntax(isRef, isPublic, isReadonly, name, typeParameters, interfaces, [], attributes, null, null, null, modifier, derive?.Traits, headerParams) { NameSpan = SpanOf(nameTok), Visibility = declVisibility };
+                return ApplyCompilerDirectives(new DataDeclarationSyntax(isRef, isPublic, isReadonly, name, typeParameters, interfaces, [], attributes, null, null, null, modifier, derive?.Traits, headerParams) { NameSpan = SpanOf(nameTok), Visibility = declVisibility, GenericConstraints = typeParameterConstraints }, directives);
         }
 
         Match(SyntaxTokenKind.OpenBrace, "Expected '{' after data declaration.");
@@ -653,8 +723,13 @@ sealed class DeclarationParser : ParserUnit
             // front and attached to the method form that follows. Attributes on
             // non-method members of a data body are not a supported form yet.
             List<AttributeSyntax>? memberAttributes = null;
-            if (Current.Kind == SyntaxTokenKind.OpenBracket)
-                memberAttributes = ParseAttributeList();
+            List<CompilerDirectiveSyntax>? memberDirectives = null;
+            if (Current.Kind is SyntaxTokenKind.OpenBracket or SyntaxTokenKind.At)
+            {
+                var prefixes = ParseDeclarationPrefixes();
+                memberAttributes = prefixes.Attributes;
+                memberDirectives = prefixes.Directives;
+            }
 
             // Nested type declaration — `class Outer { struct Inner { ... } }`. Checked
             // before the member forms below: a nested type's keyword (or `derive` /
@@ -662,7 +737,7 @@ sealed class DeclarationParser : ParserUnit
             // field/method, and the attributes parsed above flow to the nested type.
             if (IsNestedTypeStart())
             {
-                nestedTypes.Add(ParseNestedType(memberAttributes ?? []));
+                nestedTypes.Add(ParseNestedType(memberAttributes ?? [], memberDirectives));
                 SkipSeparators();
                 continue;
             }
@@ -682,7 +757,7 @@ sealed class DeclarationParser : ParserUnit
             if ((Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "virtual") && Peek(1).Kind == SyntaxTokenKind.FuncKeyword)
             {
                 NextToken(); // consume virtual
-                var m = ParseFunctionDeclaration(isPublic, modifier: FunctionModifier.Virtual, attributes: memberAttributes);
+                var m = ParseFunctionDeclaration(isPublic, modifier: FunctionModifier.Virtual, attributes: memberAttributes, directives: memberDirectives);
                 var selfParam = new ParameterSyntax("self", new NamedTypeSyntax(name));
                 var ps = new List<ParameterSyntax> { selfParam };
                 ps.AddRange(m.Parameters);
@@ -696,7 +771,7 @@ sealed class DeclarationParser : ParserUnit
                     Report(Current.Line, Current.Column,
                         $"ES2125: 'abstract func' is only allowed inside 'abstract class'. Mark '{name}' abstract or remove the abstract on this method.");
                 NextToken(); // consume abstract
-                var m = ParseFunctionDeclaration(isPublic, modifier: FunctionModifier.Abstract, attributes: memberAttributes);
+                var m = ParseFunctionDeclaration(isPublic, modifier: FunctionModifier.Abstract, attributes: memberAttributes, directives: memberDirectives);
                 var selfParam = new ParameterSyntax("self", new NamedTypeSyntax(name));
                 var ps = new List<ParameterSyntax> { selfParam };
                 ps.AddRange(m.Parameters);
@@ -710,7 +785,7 @@ sealed class DeclarationParser : ParserUnit
                     Report(Current.Line, Current.Column,
                         $"ES2124: ':' prefix is only valid inside a class declaring inheritance — '{name}' has no base type or interface list.");
                 NextToken(); // consume :
-                var m = ParseFunctionDeclaration(isPublic, modifier: FunctionModifier.InheritColon, attributes: memberAttributes);
+                var m = ParseFunctionDeclaration(isPublic, modifier: FunctionModifier.InheritColon, attributes: memberAttributes, directives: memberDirectives);
                 var selfParam = new ParameterSyntax("self", new NamedTypeSyntax(name));
                 var ps = new List<ParameterSyntax> { selfParam };
                 ps.AddRange(m.Parameters);
@@ -816,7 +891,7 @@ sealed class DeclarationParser : ParserUnit
                     methodPublic = true;
                     NextToken();
                 }
-                var methodDecl = ParseFunctionDeclaration(methodPublic, attributes: memberAttributes);
+                var methodDecl = ParseFunctionDeclaration(methodPublic, attributes: memberAttributes, directives: memberDirectives);
                 // Prepend implicit self parameter
                 var selfParam = new ParameterSyntax("self", new NamedTypeSyntax(name));
                 var allParams = new List<ParameterSyntax> { selfParam };
@@ -978,10 +1053,24 @@ sealed class DeclarationParser : ParserUnit
 
         Match(SyntaxTokenKind.CloseBrace, "Expected '}' to close data declaration.");
         HoistInitFields(fields, initDecls, isPublic);
-        var decl = new DataDeclarationSyntax(isRef, isPublic, isReadonly, name, typeParameters, interfaces, fields, attributes, initDecls.Count > 0 ? initDecls : null, inlineMethods.Count > 0 ? inlineMethods : null, defaultReturns, modifier, derive?.Traits, headerParams, NestedTypes: nestedTypes.Count > 0 ? nestedTypes : null) { NameSpan = SpanOf(nameTok), Visibility = declVisibility };
+        var decl = new DataDeclarationSyntax(isRef, isPublic, isReadonly, name, typeParameters, interfaces, fields, attributes, initDecls.Count > 0 ? initDecls : null, inlineMethods.Count > 0 ? inlineMethods : null, defaultReturns, modifier, derive?.Traits, headerParams, NestedTypes: nestedTypes.Count > 0 ? nestedTypes : null) { NameSpan = SpanOf(nameTok), Visibility = declVisibility, GenericConstraints = typeParameterConstraints };
         // Synthesize property accessor methods (computed getter, custom setter) from the
         // declaration's property fields — see Lowering/PropertyLowering.cs.
-        return PropertyLowering.Lower(decl);
+        return ApplyCompilerDirectives(PropertyLowering.Lower(decl), directives);
+    }
+
+    static DataDeclarationSyntax ApplyCompilerDirectives(
+        DataDeclarationSyntax declaration,
+        IReadOnlyList<CompilerDirectiveSyntax>? directives)
+    {
+        if (directives is not { Count: > 0 }) return declaration;
+        IReadOnlyList<FunctionDeclarationSyntax>? methods = declaration.Methods;
+        var inherited = directives.Where(d => d.Name == "floatMode").ToList();
+        if (inherited.Count > 0 && methods is { Count: > 0 })
+            methods = methods.Select(method => method.CompilerDirectives.Count == 0
+                ? method with { CompilerDirectives = inherited }
+                : method).ToList();
+        return declaration with { CompilerDirectives = directives, Methods = methods };
     }
 
     void HoistInitFields(List<FieldSyntax> fields, List<InitDeclarationSyntax> inits, bool typeIsPublic)
@@ -1030,9 +1119,11 @@ sealed class DeclarationParser : ParserUnit
 
     /// Parse a property accessor block `{ … }` on a `data`/`class` member. The base
     /// accessor set is keyword-derived (`let`→get · `required let`→get+init · `var`→
-    /// get+set); an empty block takes that set auto-backed. A `set(v) => expr` supplies
-    /// a custom setter body over the auto getter. Bare `get`/`set`/`init` tokens are
-    /// tolerated (the explicit form), but the keyword already implies the set here.
+    /// get+set); an empty block takes that set auto-backed. `get => expr` supplies a
+    /// behavioral getter with no implicit storage. `set(v) => expr` transforms the
+    /// value stored by an auto getter, or performs the write behavior paired with a
+    /// custom getter. Bare `get`/`set`/`init` tokens are tolerated (the explicit form),
+    /// but the keyword already implies the set here.
     PropertyAccessorsSyntax ParsePropertyAccessorBlock(bool mutable, bool required)
     {
         Match(SyntaxTokenKind.OpenBrace, "Expected '{' to open property accessors.");
@@ -1041,16 +1132,40 @@ sealed class DeclarationParser : ParserUnit
         var hasGet = true;
         var hasSet = mutable;
         var hasInit = required && !mutable;
+        ExpressionSyntax? getterBody = null;
         string? setterParam = null;
         ExpressionSyntax? setterBody = null;
         string? locaStorageName = null;
         string? mutStorageName = null;
         BlockStatementSyntax? scopedMutBody = null;
+        Visibility? getterVisibility = null;
+        Visibility? setterVisibility = null;
 
         while (Current.Kind is not (SyntaxTokenKind.CloseBrace or SyntaxTokenKind.EndOfFile))
         {
             var loopStart = Current.Position;
-            if (Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "set"
+
+            // Optional per-accessor visibility: `priv set`, `pub get`. Narrows the
+            // accessor relative to the property's own visibility; ES2229 (widening) is
+            // checked in the binder, where the property visibility is known.
+            Visibility? accessorVisibility = null;
+            if (Current.Kind == SyntaxTokenKind.PubKeyword) { accessorVisibility = Visibility.Public; NextToken(); }
+            else if (Current.Kind == SyntaxTokenKind.PrivKeyword) { accessorVisibility = Visibility.Private; NextToken(); }
+
+            if (Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "get"
+                && Peek(1).Kind == SyntaxTokenKind.FatArrow)
+            {
+                if (getterBody is not null)
+                    Report(Current.Line, Current.Column,
+                        "ES2228: a property may declare only one custom getter.");
+                NextToken(); // 'get'
+                NextToken(); // '=>'
+                getterBody = Expressions.ParseExpression();
+                hasGet = true;
+                if (accessorVisibility is { } gv) getterVisibility = gv;
+                SkipSeparators();
+            }
+            else if (Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "set"
                 && Peek(1).Kind == SyntaxTokenKind.OpenParen)
             {
                 // `set(v) => expr` — custom setter binding its value explicitly.
@@ -1061,14 +1176,15 @@ sealed class DeclarationParser : ParserUnit
                 Match(SyntaxTokenKind.FatArrow, "Expected '=>' for a custom setter body.");
                 setterBody = Expressions.ParseExpression();
                 hasSet = true;
+                if (accessorVisibility is { } sv) setterVisibility = sv;
                 SkipSeparators();
             }
             else if (Current.Kind == SyntaxTokenKind.Identifier && Current.Text is "get" or "set" or "init")
             {
                 // Bare accessor keyword (explicit form): record which accessors are present.
-                if (Current.Text == "get") hasGet = true;
-                else if (Current.Text == "set") hasSet = true;
-                else hasInit = true;
+                if (Current.Text == "get") { hasGet = true; if (accessorVisibility is { } bgv) getterVisibility = bgv; }
+                else if (Current.Text == "set") { hasSet = true; if (accessorVisibility is { } bsv) setterVisibility = bsv; }
+                else { hasInit = true; if (accessorVisibility is { } biv) setterVisibility = biv; }
                 NextToken();
                 SkipSeparators();
             }
@@ -1117,14 +1233,15 @@ sealed class DeclarationParser : ParserUnit
             else
             {
                 Report(Current.Line, Current.Column,
-                    "ES2196: unexpected token in property accessor block — expected `get`, `set`, `init`, `loca => &self.name`, `mut => &self.name`, `mut { … yield &location … }`, `set(v) => …`, or `}`.");
+                    "ES2196: unexpected token in property accessor block — expected `get`, `get => …`, `set`, `init`, `loca => &self.name`, `mut => &self.name`, `mut { … yield &location … }`, `set(v) => …`, or `}`.");
                 NextToken();
             }
             if (Current.Position == loopStart && Current.Kind != SyntaxTokenKind.EndOfFile) NextToken();
         }
         Match(SyntaxTokenKind.CloseBrace, "Expected '}' to close property accessors.");
-        return new PropertyAccessorsSyntax(hasGet, hasSet, hasInit, ComputedGetter: null, setterParam, setterBody,
-            locaStorageName, mutStorageName, scopedMutBody);
+        return new PropertyAccessorsSyntax(hasGet, hasSet, hasInit, getterBody, setterParam, setterBody,
+            locaStorageName, mutStorageName, scopedMutBody, HasCustomGetter: getterBody is not null,
+            GetterVisibility: getterVisibility, SetterVisibility: setterVisibility);
     }
 
     ChoiceDeclarationSyntax ParseChoiceDeclaration(bool isPublic = false)
@@ -1189,11 +1306,45 @@ sealed class DeclarationParser : ParserUnit
         return new ChoiceDeclarationSyntax(isRef, isPublic, name, typeParameters, cases) { NameSpan = SpanOf(nameTok), Visibility = _declVisibility };
     }
 
+    // Parses `< T [: bound], U, … >`. Returns the parameter names and fills
+    // `constraints` in parallel — a null entry is an unbounded parameter, a non-null one
+    // is its bound name (today only `unmanaged`). No leading `<` yields empty lists.
+    List<string> ParseTypeParameterList(out List<string?> constraints)
+    {
+        var names = new List<string>();
+        constraints = new List<string?>();
+        if (Current.Kind != SyntaxTokenKind.Less) return names;
+        NextToken();
+        while (Current.Kind is not (SyntaxTokenKind.Greater or SyntaxTokenKind.EndOfFile))
+        {
+            names.Add(Match(SyntaxTokenKind.Identifier, "Expected type parameter name.").Text);
+            string? bound = null;
+            if (Current.Kind == SyntaxTokenKind.Colon)
+            {
+                NextToken();
+                bound = Match(SyntaxTokenKind.Identifier, "Expected a type-parameter bound such as 'unmanaged'.").Text;
+            }
+            constraints.Add(bound);
+            if (Current.Kind == SyntaxTokenKind.Comma) NextToken();
+        }
+        Match(SyntaxTokenKind.Greater, "Expected '>' to close type parameter list.");
+        return names;
+    }
+
     EnumDeclarationSyntax ParseEnumDeclaration(bool isPublic = false)
     {
         Match(SyntaxTokenKind.EnumKeyword);
         var nameTok = Match(SyntaxTokenKind.Identifier, "Expected enum type name.");
         var name = nameTok.Text;
+
+        // Optional underlying-type annotation: `enum Codec: byte { … }`.
+        TypeSyntax? underlying = null;
+        if (Current.Kind == SyntaxTokenKind.Colon)
+        {
+            NextToken();
+            underlying = Types.ParseTypeUntil(SyntaxTokenKind.OpenBrace, SyntaxTokenKind.NewLine);
+        }
+
         SkipSeparators();
         Match(SyntaxTokenKind.OpenBrace, "Expected '{' after enum declaration.");
         SkipSeparators();
@@ -1221,7 +1372,7 @@ sealed class DeclarationParser : ParserUnit
         }
 
         Match(SyntaxTokenKind.CloseBrace, "Expected '}' to close enum declaration.");
-        return new EnumDeclarationSyntax(isPublic, name, cases) { NameSpan = SpanOf(nameTok), Visibility = _declVisibility };
+        return new EnumDeclarationSyntax(isPublic, name, cases, underlying) { NameSpan = SpanOf(nameTok), Visibility = _declVisibility };
     }
 
     /// An enum case name. Case position is unambiguous, so a reserved word reads as a
@@ -1241,7 +1392,7 @@ sealed class DeclarationParser : ParserUnit
         return Match(SyntaxTokenKind.Identifier, "Expected enum case name.");
     }
 
-    InterfaceDeclarationSyntax ParseInterfaceDeclaration(bool isPublic = false)
+    InterfaceDeclarationSyntax ParseInterfaceDeclaration(bool isPublic = false, List<CompilerDirectiveSyntax>? directives = null)
     {
         Match(SyntaxTokenKind.InterfaceKeyword);
         var nameTok = Match(SyntaxTokenKind.Identifier, "Expected interface name.");
@@ -1361,7 +1512,8 @@ sealed class DeclarationParser : ParserUnit
         }
 
         Match(SyntaxTokenKind.CloseBrace, "Expected '}' to close interface.");
-        return new InterfaceDeclarationSyntax(isPublic, name, typeParameters, methods, events.Count > 0 ? events : null, properties.Count > 0 ? properties : null) { NameSpan = SpanOf(nameTok), Visibility = _declVisibility };
+        return new InterfaceDeclarationSyntax(isPublic, name, typeParameters, methods, events.Count > 0 ? events : null, properties.Count > 0 ? properties : null)
+        { NameSpan = SpanOf(nameTok), Visibility = _declVisibility, CompilerDirectives = directives ?? [] };
     }
 
     // Current token is `<`. Peek past the balanced angle group and report whether a
@@ -1376,10 +1528,15 @@ sealed class DeclarationParser : ParserUnit
             if (k == SyntaxTokenKind.Less) depth++;
             else if (k == SyntaxTokenKind.Greater && --depth == 0)
                 return Peek(i + 1).Kind == SyntaxTokenKind.Dot;
+            else if (k is SyntaxTokenKind.ShiftRight or SyntaxTokenKind.UnsignedShiftRight)
+            {
+                depth -= k == SyntaxTokenKind.ShiftRight ? 2 : 3;
+                if (depth <= 0) return Peek(i + 1).Kind == SyntaxTokenKind.Dot;
+            }
         }
     }
 
-    public FunctionDeclarationSyntax ParseFunctionDeclaration(bool isPublic = false, bool isTaskFunc = false, FunctionModifier modifier = FunctionModifier.None, List<AttributeSyntax>? attributes = null, bool readonlyReceiver = false)
+    public FunctionDeclarationSyntax ParseFunctionDeclaration(bool isPublic = false, bool isTaskFunc = false, FunctionModifier modifier = FunctionModifier.None, List<AttributeSyntax>? attributes = null, bool readonlyReceiver = false, List<CompilerDirectiveSyntax>? directives = null)
     {
         if ((Current.Kind == SyntaxTokenKind.Identifier && Current.Text == "task"))
         {
@@ -1410,7 +1567,17 @@ sealed class DeclarationParser : ParserUnit
                 "'readonly func' modifies a method receiver — write 'readonly func (c: T) name()'. A free function cannot be 'readonly'.");
         }
 
-        var nameTok = Match(SyntaxTokenKind.Identifier, "Expected function name.");
+        SyntaxToken nameTok;
+        SyntaxTokenKind? operatorKind = null;
+        if (SyntaxFacts.IsOverloadableOperator(Current.Kind))
+        {
+            nameTok = NextToken();
+            operatorKind = nameTok.Kind;
+        }
+        else
+        {
+            nameTok = Match(SyntaxTokenKind.Identifier, "Expected function name.");
+        }
         var name = nameTok.Text;
 
         // Explicit interface implementation: `func IFace.method(...)`. The leading
@@ -1439,17 +1606,7 @@ sealed class DeclarationParser : ParserUnit
         }
 
         // Parse optional type parameters <T, U, ...>
-        var typeParameters = new List<string>();
-        if (Current.Kind == SyntaxTokenKind.Less)
-        {
-            NextToken();
-            while (Current.Kind is not (SyntaxTokenKind.Greater or SyntaxTokenKind.EndOfFile))
-            {
-                typeParameters.Add(Match(SyntaxTokenKind.Identifier, "Expected type parameter name.").Text);
-                if (Current.Kind == SyntaxTokenKind.Comma) NextToken();
-            }
-            Match(SyntaxTokenKind.Greater, "Expected '>' to close type parameter list.");
-        }
+        var typeParameters = ParseTypeParameterList(out var typeParameterConstraints);
 
         Match(SyntaxTokenKind.OpenParen, "Expected '(' after function name.");
 
@@ -1514,7 +1671,8 @@ sealed class DeclarationParser : ParserUnit
              || (Current.Kind == SyntaxTokenKind.Identifier && Current.Text is "abstract" or "virtual")))
         {
             var emptyBody = new BlockStatementSyntax(new List<StatementSyntax>()) { Span = SpanHere() };
-            return new FunctionDeclarationSyntax(isPublic, name, typeParameters, parameters, returnType, emptyBody, attrs, false, modifier, isTaskFunc, explicitInterface) { Span = SpanHere(), NameSpan = SpanOf(nameTok) };
+            return new FunctionDeclarationSyntax(isPublic, name, typeParameters, parameters, returnType, emptyBody, attrs, false, modifier, isTaskFunc, explicitInterface)
+            { Span = SpanHere(), NameSpan = SpanOf(nameTok), CompilerDirectives = directives ?? [], OperatorKind = operatorKind, GenericConstraints = typeParameterConstraints };
         }
         BlockStatementSyntax body;
         if (Current.Kind == SyntaxTokenKind.Equals)
@@ -1531,7 +1689,8 @@ sealed class DeclarationParser : ParserUnit
         {
             body = Statements.ParseBlockStatement();
         }
-        return new FunctionDeclarationSyntax(isPublic, name, typeParameters, parameters, returnType, body, attrs, hasExplicitReturn, modifier, isTaskFunc, explicitInterface, receiver) { NameSpan = SpanOf(nameTok) };
+        return new FunctionDeclarationSyntax(isPublic, name, typeParameters, parameters, returnType, body, attrs, hasExplicitReturn, modifier, isTaskFunc, explicitInterface, receiver)
+        { NameSpan = SpanOf(nameTok), CompilerDirectives = directives ?? [], OperatorKind = operatorKind, GenericConstraints = typeParameterConstraints };
     }
 
     // delegate func Name(params) [-> R]  — a nominal delegate type declaration.

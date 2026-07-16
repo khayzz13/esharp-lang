@@ -23,6 +23,9 @@
     <TargetFramework Condition="'$(TargetFramework)' == ''">net10.0</TargetFramework>
     <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
     <DebugSymbols Condition="'$(DebugSymbols)' == ''">true</DebugSymbols>
+    <EsharpOptimizationLevel Condition="'$(EsharpOptimizationLevel)' == '' and '$(Optimize)' == 'true'">Release</EsharpOptimizationLevel>
+    <EsharpOptimizationLevel Condition="'$(EsharpOptimizationLevel)' == ''">Debug</EsharpOptimizationLevel>
+    <EsharpShowAllocations Condition="'$(EsharpShowAllocations)' == ''">false</EsharpShowAllocations>
     <!-- Implicit (standard BCL namespace) usings. Honor the conventional
          <ImplicitUsings>enable|disable</ImplicitUsings>, falling back to true.
          When false, unqualified names resolve only from exact/qualified matches

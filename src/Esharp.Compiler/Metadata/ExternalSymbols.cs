@@ -255,7 +255,7 @@ public sealed class ExternalSymbols : IExternalSymbols
 
     static bool IsPrimitiveDisplayName(string name) =>
         name is "int" or "long" or "short" or "byte" or "sbyte"
-             or "uint" or "ulong" or "ushort" or "float" or "double"
+             or "uint" or "ulong" or "ushort" or "nint" or "nuint" or "float" or "double"
              or "decimal" or "bool" or "char" or "string" or "object";
 
     /// A runtime type rendered in E# source spelling: <c>Int32</c> → <c>int</c>,

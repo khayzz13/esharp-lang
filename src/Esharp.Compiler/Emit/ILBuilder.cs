@@ -284,6 +284,10 @@ public sealed class ILBuilder
 
     public void NewArray(TypeReference elementType) { Adjust(0); Emit(ILOpCode.Newarr, elementType); }
     public void LoadLength() => EmitOpCode(ILOpCode.Ldlen);
+    /// `sizeof T` — pushes the size in bytes of a value type / primitive.
+    public void Sizeof(TypeReference t) { Adjust(+1); Emit(ILOpCode.Sizeof, t); }
+    /// `localloc` — pops a byte count, pushes a frame-local `void*` (net stack 0).
+    public void Localloc() => EmitOpCode(ILOpCode.Localloc);
     public void LoadElementAddress(TypeReference t) { Adjust(-1); Emit(ILOpCode.Ldelema, t); }
     public void LoadElement(TypeReference t) { Adjust(-1); Emit(ILOpCode.Ldelem, t); }
     public void StoreElement(TypeReference t) { Adjust(-3); Emit(ILOpCode.Stelem, t); }
@@ -298,12 +302,15 @@ public sealed class ILBuilder
     public void Sub() => EmitOpCode(ILOpCode.Sub);
     public void Mul() => EmitOpCode(ILOpCode.Mul);
     public void Div() => EmitOpCode(ILOpCode.Div);
+    public void DivUn() => EmitOpCode(ILOpCode.Div_un);
     public void Rem() => EmitOpCode(ILOpCode.Rem);
+    public void RemUn() => EmitOpCode(ILOpCode.Rem_un);
     public void And() => EmitOpCode(ILOpCode.And);
     public void Or() => EmitOpCode(ILOpCode.Or);
     public void Xor() => EmitOpCode(ILOpCode.Xor);
     public void Shl() => EmitOpCode(ILOpCode.Shl);
     public void Shr() => EmitOpCode(ILOpCode.Shr);
+    public void ShrUn() => EmitOpCode(ILOpCode.Shr_un);
     public void Neg() => EmitOpCode(ILOpCode.Neg);
     public void Not() => EmitOpCode(ILOpCode.Not);
     public void Ceq() => EmitOpCode(ILOpCode.Ceq);

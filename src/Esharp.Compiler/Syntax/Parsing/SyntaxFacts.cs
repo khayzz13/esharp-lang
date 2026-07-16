@@ -13,12 +13,14 @@ static class SyntaxFacts
         SyntaxTokenKind.Identifier or SyntaxTokenKind.NumberLiteral or SyntaxTokenKind.StringLiteral
         or SyntaxTokenKind.TrueKeyword or SyntaxTokenKind.FalseKeyword or SyntaxTokenKind.NilKeyword
         or SyntaxTokenKind.OpenParen or SyntaxTokenKind.OpenBracket
-        or SyntaxTokenKind.Bang or SyntaxTokenKind.Minus or SyntaxTokenKind.Ampersand;
+        or SyntaxTokenKind.Bang or SyntaxTokenKind.Plus or SyntaxTokenKind.Minus
+        or SyntaxTokenKind.Tilde or SyntaxTokenKind.Ampersand;
 
     public static int GetUnaryPrecedence(SyntaxTokenKind kind) =>
         kind switch
         {
-            SyntaxTokenKind.Bang or SyntaxTokenKind.Minus or SyntaxTokenKind.NotKeyword or SyntaxTokenKind.Star => 7,
+            SyntaxTokenKind.Bang or SyntaxTokenKind.Plus or SyntaxTokenKind.Minus or SyntaxTokenKind.Tilde
+                or SyntaxTokenKind.NotKeyword or SyntaxTokenKind.Star => 11,
             _ => 0,
         };
 
@@ -27,10 +29,23 @@ static class SyntaxFacts
         {
             SyntaxTokenKind.PipePipe or SyntaxTokenKind.OrKeyword => 1,
             SyntaxTokenKind.AmpAmp or SyntaxTokenKind.AndKeyword => 2,
-            SyntaxTokenKind.EqualsEquals or SyntaxTokenKind.BangEquals => 3,
-            SyntaxTokenKind.Less or SyntaxTokenKind.LessEquals or SyntaxTokenKind.Greater or SyntaxTokenKind.GreaterEquals => 4,
-            SyntaxTokenKind.Plus or SyntaxTokenKind.Minus => 5,
-            SyntaxTokenKind.Star or SyntaxTokenKind.Slash or SyntaxTokenKind.Percent => 6,
+            SyntaxTokenKind.Pipe => 3,
+            SyntaxTokenKind.Caret => 4,
+            SyntaxTokenKind.Ampersand => 5,
+            SyntaxTokenKind.EqualsEquals or SyntaxTokenKind.BangEquals => 6,
+            SyntaxTokenKind.Less or SyntaxTokenKind.LessEquals or SyntaxTokenKind.Greater or SyntaxTokenKind.GreaterEquals => 7,
+            SyntaxTokenKind.ShiftLeft or SyntaxTokenKind.ShiftRight or SyntaxTokenKind.UnsignedShiftRight => 8,
+            SyntaxTokenKind.Plus or SyntaxTokenKind.Minus => 9,
+            SyntaxTokenKind.Star or SyntaxTokenKind.Slash or SyntaxTokenKind.Percent => 10,
             _ => 0,
         };
+
+    public static bool IsOverloadableOperator(SyntaxTokenKind kind) => kind is
+        SyntaxTokenKind.Plus or SyntaxTokenKind.Minus or SyntaxTokenKind.Bang or SyntaxTokenKind.Tilde or
+        SyntaxTokenKind.Star or SyntaxTokenKind.Slash or SyntaxTokenKind.Percent or
+        SyntaxTokenKind.Ampersand or SyntaxTokenKind.Pipe or SyntaxTokenKind.Caret or
+        SyntaxTokenKind.ShiftLeft or SyntaxTokenKind.ShiftRight or SyntaxTokenKind.UnsignedShiftRight or
+        SyntaxTokenKind.EqualsEquals or SyntaxTokenKind.BangEquals or
+        SyntaxTokenKind.Less or SyntaxTokenKind.LessEquals or
+        SyntaxTokenKind.Greater or SyntaxTokenKind.GreaterEquals;
 }

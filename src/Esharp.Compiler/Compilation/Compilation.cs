@@ -91,7 +91,11 @@ public sealed class Compilation : IDisposable
         _references = references;
         _outputKind = outputKind;
         _options = options;
-        _data = new CompilationData { EnableImplicitUsings = options.EnableImplicitUsings };
+        _data = new CompilationData
+        {
+            EnableImplicitUsings = options.EnableImplicitUsings,
+            ShowAllocations = options.ShowAllocations,
+        };
         _xmlDocs = new Esharp.Metadata.MetadataXmlDocs();
         _externalSymbols = new Esharp.Metadata.ExternalSymbols();
         _metadataReader = new Esharp.Metadata.MetadataReader(_externalSymbols, _xmlDocs);
@@ -159,6 +163,7 @@ public sealed class Compilation : IDisposable
         {
             Sink = collector,
             EnableImplicitUsings = _options.EnableImplicitUsings,
+            ShowAllocations = _options.ShowAllocations,
         };
         if (_csharpCompilation is not null)
             foreach (var handle in RoslynSymbolAdapter.CollectSourceDeclaredTypes(_csharpCompilation))
@@ -208,7 +213,8 @@ public sealed class Compilation : IDisposable
                     internalsVisibleTo: null,
                     externalSymbols: null,
                     outputKind: TranslateOutputKind(_outputKind),
-                    implicitUsings: _options.EnableImplicitUsings);
+                    implicitUsings: _options.EnableImplicitUsings,
+                    optimization: _options.Optimization);
                 using (esharpOnlyAsm)
                 {
                     if (debugSymbols)
@@ -248,7 +254,8 @@ public sealed class Compilation : IDisposable
                 referencePaths: refPaths, internalsVisibleTo: csharpHalfName,
                 externalSymbols: _data.Symbols,
                 outputKind: TranslateOutputKind(_outputKind),
-                implicitUsings: _options.EnableImplicitUsings);
+                implicitUsings: _options.EnableImplicitUsings,
+                optimization: _options.Optimization);
             using (esharpAsm)
                 esharpAsm.Write(esharpPe);
             bindDiagnostics = bindDiagnostics.Concat(esharpIlDiagnostics).ToList();
@@ -307,7 +314,8 @@ public sealed class Compilation : IDisposable
         {
             var (assembly, ilDiagnostics) = CodeGenerator.Generate(
                 program, _assemblyName, debugSymbols: false,
-                referencePaths: refPaths, implicitUsings: _options.EnableImplicitUsings);
+                referencePaths: refPaths, implicitUsings: _options.EnableImplicitUsings,
+                optimization: _options.Optimization);
             using (assembly) assembly.Write(peStream);
             var all = bindDiagnostics.Concat(ilDiagnostics).ToList();
             return new EmitResult(!all.Any(d => d.Severity == DiagnosticSeverity.Error), all);

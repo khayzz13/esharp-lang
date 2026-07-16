@@ -51,7 +51,7 @@ public class TotalBinderTests
         "func main() { spawn { ",
         "static S { let x = ",
         "func f() { for i in }",
-        "interface I { func }",
+        "interface IBroken { func }",
         // unterminated literals / interpolation
         "func main() { let s = \"abc }",
         "func main() { let s = \"a {b\" }",

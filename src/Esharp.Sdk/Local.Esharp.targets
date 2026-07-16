@@ -6,7 +6,8 @@
   <Import Project="Sdk.targets" Sdk="$(EsharpSdkBase)" />
 
   <PropertyGroup>
-    <_EsharpBuildDir>$(MSBuildThisFileDirectory)../Esharp.Build/bin/Debug/net10.0/</_EsharpBuildDir>
+    <_EsharpBuildDir>$(MSBuildThisFileDirectory)../Esharp.Build/bin/$(Configuration)/net10.0/</_EsharpBuildDir>
+    <_EsharpBuildDir Condition="!Exists('$(_EsharpBuildDir)Esharp.Build.dll')">$(MSBuildThisFileDirectory)../Esharp.Build/bin/Debug/net10.0/</_EsharpBuildDir>
   </PropertyGroup>
 
   <UsingTask TaskName="Esharp.Build.EsharpCompile"
@@ -31,6 +32,8 @@
       AssemblyName="$(AssemblyName)"
       OutputType="$(OutputType)"
       EnableImplicitUsings="$(EnableImplicitUsings)"
+      OptimizationLevel="$(EsharpOptimizationLevel)"
+      ShowAllocations="$(EsharpShowAllocations)"
       DebugSymbols="$(DebugSymbols)" />
 
     <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).dll"

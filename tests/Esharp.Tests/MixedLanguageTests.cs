@@ -231,6 +231,56 @@ public static class Caller
     }
 
     [Fact]
+    public void CSharp_Operator_Consumed_From_Esharp()
+    {
+        var es = """
+namespace Test
+func add(left: CsVec, right: CsVec) -> int { let result = left + right
+ return result.X }
+""";
+        var cs = """
+namespace Test;
+public sealed class CsVec
+{
+    public int X { get; }
+    public CsVec(int x) => X = x;
+    public static CsVec operator +(CsVec left, CsVec right) => new(left.X + right.X);
+}
+""";
+        var (asm, diags) = CompileMixed(es, cs);
+        Assert.True(asm is not null, $"compilation failed: {string.Join("\n", diags.Select(d => d.ToString()))}");
+        var type = asm!.GetType("Test.CsVec")!;
+        Assert.Equal(9, Invoke(asm, "Test.Test", "add", Activator.CreateInstance(type, 4), Activator.CreateInstance(type, 5)));
+    }
+
+    [Fact]
+    public void Public_Esharp_Operator_Consumed_From_Csharp()
+    {
+        var es = """
+namespace Test
+pub struct EsVec { x: int }
+pub static EsVec {
+    pub func +(left: EsVec, right: EsVec) -> EsVec = EsVec { x: left.x + right.x }
+}
+""";
+        var cs = """
+namespace Test;
+public static class OperatorConsumer
+{
+    public static int Add(EsVec left, EsVec right) => (left + right).x;
+}
+""";
+        var (asm, diags) = CompileMixed(es, cs);
+        Assert.True(asm is not null, $"compilation failed: {string.Join("\n", diags.Select(d => d.ToString()))}");
+        var type = asm!.GetType("Test.EsVec")!;
+        var left = Activator.CreateInstance(type)!;
+        var right = Activator.CreateInstance(type)!;
+        type.GetField("x")!.SetValue(left, 6);
+        type.GetField("x")!.SetValue(right, 7);
+        Assert.Equal(13, Invoke(asm, "Test.OperatorConsumer", "Add", left, right));
+    }
+
+    [Fact]
     public void CSharp_Interface_Implemented_By_Esharp_Data()
     {
         // E# `struct Greeter : IDescribable {}` plus a promoted top-level
@@ -347,6 +397,109 @@ public static class Caller
         var (asm, diags) = CompileMixed(es, cs);
         Assert.True(asm is not null, $"compilation failed: {string.Join("\n", diags.Select(d => d.ToString()))}");
         Assert.Equal(42, Invoke(asm!, "Test.Caller", "Use", 21));
+    }
+
+    // The circular in-project cross-language inheritance chain: a C# base, an E#
+    // type DERIVED FROM IT, and a C# type derived from the E# type — all one project,
+    // one output assembly. This is the exact "intermediate E# type between two C#
+    // types" case claimed impossible without forking Roslyn. It resolves because the
+    // E# half emits first (forward typeref to `Base`), Roslyn compiles the C# half
+    // against the emitted E# PE, and Roslyn binds the E# PE's reference back to the
+    // source assembly being built (resolveAgainstAssemblyBeingBuilt, ported from the
+    // native compiler's IMPORTER::MapAssemblyRefToAid). ILRepack fuses both halves.
+    [Fact]
+    public void CSharp_Esharp_CSharp_InheritanceChain()
+    {
+        // .es: the intermediate type — Derived : Base(C#), adding its own member, itself
+        // `open` so the C# leaf can extend it.
+        var es = """
+namespace Test
+
+pub open class Derived : Base {
+    pub func Mid() -> int = 7
+}
+""";
+        // .cs: BOTH ends — Base, and DerivedDerived : Derived(E#).
+        var cs = """
+namespace Test;
+
+public class Base
+{
+    public int BaseVal() => 10;
+}
+
+public class DerivedDerived : Derived
+{
+    public int Leaf() => 100;
+}
+""";
+        var (asm, diags) = CompileMixed(es, cs);
+        Assert.True(asm is not null, $"compilation failed: {string.Join("\n", diags.Select(d => d.ToString()))}");
+
+        var baseT = asm!.GetType("Test.Base")!;
+        var derivedT = asm.GetType("Test.Derived")!;
+        var ddT = asm.GetType("Test.DerivedDerived")!;
+        Assert.NotNull(baseT);
+        Assert.NotNull(derivedT);
+        Assert.NotNull(ddT);
+
+        // The chain is real in metadata: DerivedDerived -> Derived(E#) -> Base(C#).
+        Assert.Equal(derivedT, ddT.BaseType);
+        Assert.Equal(baseT, derivedT.BaseType);
+
+        var dd = Activator.CreateInstance(ddT)!;
+
+        // The C# base's member is inherited THROUGH the E# intermediate down to the C# leaf.
+        var baseVal = ddT.GetMethod("BaseVal")!.Invoke(dd, null);
+        Assert.Equal(10, baseVal);
+
+        // The E# intermediate's own member is inherited by the C# leaf — the E# link is real.
+        var mid = ddT.GetMethod("Mid")!.Invoke(dd, null);
+        Assert.Equal(7, mid);
+
+        // The C# leaf's own member.
+        var leaf = ddT.GetMethod("Leaf")!.Invoke(dd, null);
+        Assert.Equal(100, leaf);
+    }
+
+    // The docs worked example: a C# base, an E# type extending it, and a C# leaf extending
+    // the E# type — one .esproj — where the C# leaf sees BOTH the C# base's member and the
+    // E# type's member. Stays inside the proven envelope (no cross-language ctor-with-args).
+    [Fact]
+    public void MixedChain_DocsExample_HandlerHierarchy()
+    {
+        var es = """
+namespace Plugins
+
+// An E# type slots into the middle of the C# hierarchy and adds its own behavior.
+pub open class RetryHandler : Handler {
+    pub func MaxAttempts() -> int = 3
+}
+""";
+        var cs = """
+namespace Plugins;
+
+// Existing C# base in the project.
+public class Handler
+{
+    public string Channel() => "core";
+}
+
+// A C# type extends the E# RetryHandler and uses members from BOTH sides of the boundary.
+public class LoggingRetryHandler : RetryHandler
+{
+    public string Describe() => $"{Channel()} x{MaxAttempts()}";
+}
+""";
+        var (asm, diags) = CompileMixed(es, cs);
+        Assert.True(asm is not null, $"compilation failed: {string.Join("\n", diags.Select(d => d.ToString()))}");
+        var t = asm!.GetType("Plugins.LoggingRetryHandler")!;
+        var h = Activator.CreateInstance(t)!;
+        // Describe() combines Channel() (C# base) and MaxAttempts() (E# middle), both inherited.
+        Assert.Equal("core x3", t.GetMethod("Describe")!.Invoke(h, null));
+        // The chain is real: LoggingRetryHandler(C#) -> RetryHandler(E#) -> Handler(C#).
+        Assert.Equal("Plugins.RetryHandler", t.BaseType!.FullName);
+        Assert.Equal("Plugins.Handler", t.BaseType!.BaseType!.FullName);
     }
 
     public void Dispose()

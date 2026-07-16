@@ -289,11 +289,11 @@ public sealed class TypeGrammarTests
     [Fact]
     public void DataInterfaces_AreStructuredNodes()
     {
-        var parser = new Parser("namespace T\ninterface Shape { func area() -> int }\nstruct Circle : Shape {\n    r: int\n    func area() -> int { return 3 * this.r }\n}\n");
+        var parser = new Parser("namespace T\ninterface IShape { func area() -> int }\nstruct Circle : IShape {\n    r: int\n    func area() -> int { return 3 * this.r }\n}\n");
         var unit = parser.ParseCompilationUnit();
         Assert.Empty(parser.Diagnostics);
         var d = Assert.Single(unit.Members.OfType<DataDeclarationSyntax>(), x => x.Name == "Circle");
-        Assert.Equal("Shape", Assert.IsType<NamedTypeSyntax>(Assert.Single(d.Interfaces)).Name);
+        Assert.Equal("IShape", Assert.IsType<NamedTypeSyntax>(Assert.Single(d.Interfaces)).Name);
     }
 
     // ════════════════════════════════════════════════════════════════════════

@@ -77,6 +77,7 @@ public abstract class BoundTreeRewriter
         BoundObjectCreationExpression _n       => RewriteObjectCreationExpression(_n),
         BoundIndexExpression _n                => RewriteIndexExpression(_n),
         BoundArrayCreationExpression _n        => RewriteArrayCreationExpression(_n),
+        BoundStackAllocExpression _n           => RewriteStackAllocExpression(_n),
         BoundTupleLiteralExpression _n         => RewriteTupleLiteralExpression(_n),
         BoundDefaultExpression _n               => _n,
         BoundOutArgumentExpression _n               => _n,
@@ -447,6 +448,13 @@ public abstract class BoundTreeRewriter
     }
 
     protected virtual BoundExpression RewriteArrayCreationExpression(BoundArrayCreationExpression node)
+    {
+        var size = RewriteExpression(node.Size);
+        if (ReferenceEquals(size, node.Size)) return node;
+        return node with { Size = size };
+    }
+
+    protected virtual BoundExpression RewriteStackAllocExpression(BoundStackAllocExpression node)
     {
         var size = RewriteExpression(node.Size);
         if (ReferenceEquals(size, node.Size)) return node;

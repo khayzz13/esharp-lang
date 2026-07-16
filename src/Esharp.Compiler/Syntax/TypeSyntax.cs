@@ -17,7 +17,7 @@ public sealed record GenericTypeSyntax(string Name, IReadOnlyList<TypeSyntax> Ar
 
 /// A value-tuple type `(T1, T2, ...)`. A single-element `(T)` is kept as a
 /// one-element tuple node, matching how the previous string path treated it.
-public sealed record TupleTypeSyntax(IReadOnlyList<TypeSyntax> Elements) : TypeSyntax;
+public sealed record TupleTypeSyntax(IReadOnlyList<TypeSyntax> Elements, IReadOnlyList<string?>? ElementNames = null) : TypeSyntax;
 
 /// A function-pointer type `&(P1, P2 -> R)`. With no `->` the return is `void`
 /// (`&(int, int)`); the binder reads `ReturnType` either way.

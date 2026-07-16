@@ -59,16 +59,33 @@ public partial class MethodBodyEmitter
             switch (pt.Name)
             {
                 case "int" or "uint" or "short" or "ushort" or "byte" or "sbyte" or "char":
-                    _il.LoadInt(Convert.ToInt32(lit.Value));
+                    // Load the 32-bit bit pattern. Widen to Int64 first, then narrow
+                    // unchecked, so a `uint` at or above 2^31 (e.g. 0xFFFFFFFF) emits
+                    // as its `ldc.i4` bit pattern instead of overflowing Convert.ToInt32.
+                    _il.LoadInt(unchecked((int)Convert.ToInt64(lit.Value)));
                     return;
-                case "long" or "ulong":
+                case "long":
                     _il.LoadLong(Convert.ToInt64(lit.Value));
+                    return;
+                case "ulong":
+                    _il.LoadLong(unchecked((long)Convert.ToUInt64(lit.Value)));
+                    return;
+                case "nint":
+                    _il.LoadLong(Convert.ToInt64(lit.Value));
+                    _il.Convert(ILOpCode.Conv_i);
+                    return;
+                case "nuint":
+                    _il.LoadLong(unchecked((long)Convert.ToUInt64(lit.Value)));
+                    _il.Convert(ILOpCode.Conv_u);
                     return;
                 case "double":
                     _il.LoadDouble(Convert.ToDouble(lit.Value));
                     return;
                 case "float":
                     _il.LoadFloat(Convert.ToSingle(lit.Value));
+                    return;
+                case "decimal":
+                    EmitDecimalLiteral(Convert.ToDecimal(lit.Value));
                     return;
                 case "bool":
                     _il.LoadInt(lit.Value is true ? 1 : 0);
@@ -108,10 +125,38 @@ public partial class MethodBodyEmitter
             case string s:
                 _il.LoadString(s);
                 break;
+            case byte[] blob:
+            {
+                // A `b"…"` byte-string literal: `newarr byte` + element stores. The blob
+                // is small (magics, headers), so element-wise emission is fine.
+                var byteRef = _types.Resolve(new PrimitiveType("byte"));
+                _il.LoadInt(blob.Length);
+                _il.NewArray(byteRef);
+                for (var i = 0; i < blob.Length; i++)
+                {
+                    _il.Dup();
+                    _il.LoadInt(i);
+                    _il.LoadInt(blob[i]);
+                    _il.StoreElementTyped(ILOpCode.Stelem_i1);
+                }
+                break;
+            }
             case null:
                 _il.LoadNull();
                 break;
         }
+    }
+
+    void EmitDecimalLiteral(decimal value)
+    {
+        var bits = decimal.GetBits(value);
+        _il.LoadInt(bits[0]);
+        _il.LoadInt(bits[1]);
+        _il.LoadInt(bits[2]);
+        _il.LoadInt((bits[3] & unchecked((int)0x80000000)) != 0 ? 1 : 0);
+        _il.LoadInt((bits[3] >> 16) & 0x7f);
+        var ctor = typeof(decimal).GetConstructor([typeof(int), typeof(int), typeof(int), typeof(bool), typeof(byte)])!;
+        _il.NewObj(_types.Module.ImportReference(ctor));
     }
 
     /// Emit a bound interpolated string as `string.Concat(object[])`. Each part
@@ -265,6 +310,17 @@ public partial class MethodBodyEmitter
 
     void EmitBinary(BoundBinaryExpression bin)
     {
+        if (TryEmitResolvedOperator(bin.ResolvedOperator, bin.ExternalOperator,
+                bin.ExternalCSharpOperatorOwner, bin.ExternalCSharpOperator, [bin.Left, bin.Right]))
+            return;
+        if (_contractFma && TryEmitContractedFma(bin))
+            return;
+
+        if (bin.Left.Type is PrimitiveType { Name: "decimal" }
+            && bin.Right.Type is PrimitiveType { Name: "decimal" }
+            && TryEmitDecimalBinary(bin))
+            return;
+
         // Short-circuit logicals: && / and / || / or must NOT evaluate the
         // right operand when the left already determines the result. Otherwise
         // patterns like `i < arr.Length && arr[i] == x` index out of range.
@@ -388,7 +444,7 @@ public partial class MethodBodyEmitter
         {
             EmitExpression(bin.Left);
             EmitExpression(bin.Right);
-            EmitBinaryOp(bin.Op);
+            EmitBinaryOp(bin.Op, bin.Left.Type);   // signedness selects clt/clt.un etc.
             return;
         }
 
@@ -407,70 +463,148 @@ public partial class MethodBodyEmitter
             return;
         }
 
-        // Arithmetic
+        // Arithmetic — the shifted value (a shift) or the common operand type drives
+        // the signed/unsigned opcode choice (shr/shr.un, div/div.un, rem/rem.un).
         EmitExpression(bin.Left);
         EmitExpression(bin.Right);
-        EmitBinaryOp(bin.Op);
+        EmitBinaryOp(bin.Op, bin.Left.Type);
+    }
+
+    bool TryEmitContractedFma(BoundBinaryExpression expression)
+    {
+        if (expression.Op is not (SyntaxTokenKind.Plus or SyntaxTokenKind.Minus))
+            return false;
+        if (expression.Type is not PrimitiveType { Name: "float" or "double" } resultType)
+            return false;
+
+        var leftProduct = expression.Left as BoundBinaryExpression;
+        var rightProduct = expression.Right as BoundBinaryExpression;
+        var productOnLeft = leftProduct?.Op == SyntaxTokenKind.Star;
+        var productOnRight = rightProduct?.Op == SyntaxTokenKind.Star;
+        if (!productOnLeft && !productOnRight) return false;
+
+        var product = productOnLeft ? leftProduct! : rightProduct!;
+        var addend = productOnLeft ? expression.Right : expression.Left;
+        bool SameType(BoundExpression operand) =>
+            operand.Type is PrimitiveType primitive && primitive.Name == resultType.Name;
+        if (!SameType(product.Left) || !SameType(product.Right) || !SameType(addend))
+            return false;
+
+        // Math.FusedMultiplyAdd takes (leftFactor, rightFactor, addend). The two
+        // source shapes with the product on the right evaluate their addend first,
+        // so preserve that order with a hidden local before arranging call arguments.
+        VariableDefinition? savedAddend = null;
+        if (productOnRight)
+        {
+            EmitExpression(addend);
+            savedAddend = new VariableDefinition(_types.Resolve(addend.Type));
+            _method.Body.Variables.Add(savedAddend);
+            _il.StoreLocal(savedAddend);
+        }
+
+        EmitExpression(product.Left);
+        // c - a*b becomes FMA(-a, b, c); a*b - c becomes FMA(a, b, -c).
+        if (productOnRight && expression.Op == SyntaxTokenKind.Minus)
+            _il.Neg();
+        EmitExpression(product.Right);
+        if (savedAddend is not null)
+            _il.LoadLocal(savedAddend);
+        else
+        {
+            EmitExpression(addend);
+            if (expression.Op == SyntaxTokenKind.Minus)
+                _il.Neg();
+        }
+
+        var runtimeType = resultType.Name == "float" ? typeof(MathF) : typeof(Math);
+        var scalarType = resultType.Name == "float" ? typeof(float) : typeof(double);
+        var fma = runtimeType.GetMethod("FusedMultiplyAdd", [scalarType, scalarType, scalarType])!;
+        _il.Call(_types.Module.ImportReference(fma));
+        return true;
+    }
+
+    bool TryEmitDecimalBinary(BoundBinaryExpression bin)
+    {
+        var name = bin.Op switch
+        {
+            SyntaxTokenKind.Plus or SyntaxTokenKind.PlusEquals => "op_Addition",
+            SyntaxTokenKind.Minus or SyntaxTokenKind.MinusEquals => "op_Subtraction",
+            SyntaxTokenKind.Star or SyntaxTokenKind.StarEquals => "op_Multiply",
+            SyntaxTokenKind.Slash or SyntaxTokenKind.SlashEquals => "op_Division",
+            SyntaxTokenKind.Percent => "op_Modulus",
+            SyntaxTokenKind.EqualsEquals => "op_Equality",
+            SyntaxTokenKind.BangEquals => "op_Inequality",
+            SyntaxTokenKind.Less => "op_LessThan",
+            SyntaxTokenKind.LessEquals => "op_LessThanOrEqual",
+            SyntaxTokenKind.Greater => "op_GreaterThan",
+            SyntaxTokenKind.GreaterEquals => "op_GreaterThanOrEqual",
+            _ => null,
+        };
+        if (name is null) return false;
+        var method = typeof(decimal).GetMethod(name, [typeof(decimal), typeof(decimal)]);
+        if (method is null) return false;
+        EmitExpression(bin.Left);
+        EmitExpression(bin.Right);
+        _il.Call(_types.Module.ImportReference(method));
+        return true;
     }
 
     static bool IsStringExpr(BoundExpression e) =>
         e.Type is PrimitiveType { Name: "string" } || e.Type is ExternalType { Name: "string" };
 
-    void EmitBinaryOp(SyntaxTokenKind op)
-    {
-        switch (op)
-        {
-            case SyntaxTokenKind.Plus or SyntaxTokenKind.PlusEquals:
-                _il.Add(); break;
-            case SyntaxTokenKind.Minus or SyntaxTokenKind.MinusEquals:
-                _il.Sub(); break;
-            case SyntaxTokenKind.Star or SyntaxTokenKind.StarEquals:
-                _il.Mul(); break;
-            case SyntaxTokenKind.Slash or SyntaxTokenKind.SlashEquals:
-                _il.Div(); break;
-            case SyntaxTokenKind.Percent:
-                _il.Rem(); break;
-            case SyntaxTokenKind.EqualsEquals:
-                _il.Ceq(); break;
-            case SyntaxTokenKind.BangEquals:
-                _il.Ceq();
-                _il.LoadInt(0);
-                _il.Ceq();
-                break;
-            case SyntaxTokenKind.Less:
-                _il.Clt(); break;
-            case SyntaxTokenKind.Greater:
-                _il.Cgt(); break;
-            case SyntaxTokenKind.LessEquals:
-                _il.Cgt();
-                _il.LoadInt(0);
-                _il.Ceq();
-                break;
-            case SyntaxTokenKind.GreaterEquals:
-                _il.Clt();
-                _il.LoadInt(0);
-                _il.Ceq();
-                break;
-            case SyntaxTokenKind.AmpAmp or SyntaxTokenKind.AndKeyword:
-                _il.And(); break;
-            case SyntaxTokenKind.PipePipe or SyntaxTokenKind.OrKeyword:
-                _il.Or(); break;
-        }
-    }
-
     void EmitUnary(BoundUnaryExpression unary)
     {
+        if (TryEmitResolvedOperator(unary.ResolvedOperator, unary.ExternalOperator,
+                unary.ExternalCSharpOperatorOwner, unary.ExternalCSharpOperator, [unary.Operand]))
+            return;
+        if (unary.Op == SyntaxTokenKind.Minus && unary.Operand.Type is PrimitiveType { Name: "decimal" })
+        {
+            EmitExpression(unary.Operand);
+            _il.Call(_types.Module.ImportReference(typeof(decimal).GetMethod("op_UnaryNegation", [typeof(decimal)])!));
+            return;
+        }
         EmitExpression(unary.Operand);
         switch (unary.Op)
         {
             case SyntaxTokenKind.Minus:
                 _il.Neg();
                 break;
+            case SyntaxTokenKind.Plus:
+                break;
+            case SyntaxTokenKind.Tilde:
+                _il.Not();
+                break;
             case SyntaxTokenKind.Bang or SyntaxTokenKind.NotKeyword:
                 _il.LoadInt(0);
                 _il.Ceq();
                 break;
         }
+    }
+
+    bool TryEmitResolvedOperator(Esharp.Symbols.MethodSymbol? source, System.Reflection.MethodInfo? external,
+        ExternalCSharpType? csharpOwner, ICSharpMemberHandle? csharp,
+        IReadOnlyList<BoundExpression> operands)
+    {
+        MethodReference? method = null;
+        if (source is not null)
+        {
+            method = _types.MethodForSymbol(source);
+            if (method is MethodDefinition definition && definition.DeclaringType.HasGenericParameters)
+            {
+                var actualOwner = operands.Select(o => o.Type).OfType<DataType>()
+                    .FirstOrDefault(t => ReferenceEquals(t.Symbol, source.DeclaringType));
+                if (actualOwner is not null && _types.Resolve(actualOwner) is GenericInstanceType closedOwner)
+                    method = HostMethodOnType(definition, closedOwner);
+            }
+        }
+        else if (external is not null)
+            method = _types.Module.ImportReference(external);
+        else if (csharpOwner is not null && csharp is not null)
+            method = BuildCSharpMethodReference(csharpOwner, csharp.Name, csharp);
+        if (method is null) return false;
+        foreach (var operand in operands) EmitExpression(operand);
+        _il.Call(method);
+        return true;
     }
 
     void EmitNullConditionalAccess(BoundNullConditionalAccessExpression nca)

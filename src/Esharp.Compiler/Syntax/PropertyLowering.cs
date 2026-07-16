@@ -12,12 +12,14 @@ namespace Esharp.Syntax;
 /// stored accessors (`get_x`/`set_x` over the backing field) are emitted directly by
 /// <see cref="ILEmit.ILEmitter"/> and need no method here:
 ///
-///   • computed getter — `let x: T =&gt; expr` → `get_x(self: T) -&gt; T = expr` (recomputed,
-///     no backing field);
+///   • computed/custom getter — `let x: T =&gt; expr` or `get =&gt; expr` →
+///     `get_x(self: T) -&gt; T = expr` (recomputed, no backing field);
 ///   • custom setter — `var x: T { set(v) =&gt; valueExpr }` → `set_x(self: T, v: T) { self.x = valueExpr }`.
-///     The body is a VALUE expression stored to `x`; the in-type write `self.x` targets the
-///     backing field (only a cross-type `obj.x = v` routes through `set_x`), so the setter
-///     never re-enters itself.
+///     The body is a VALUE expression stored to `x`; the generated setter's own `self.x`
+///     write targets the backing field, while every ordinary caller (including another
+///     method on the owning type) routes through `set_x`.
+///   • behavioral setter paired with a custom getter — `set(v) =&gt; effect` becomes an
+///     expression statement in `set_x`; there is no hidden storage for a behavioral property.
 ///
 /// Runs at the close of <c>ParseDataDeclaration</c>, so a nested type — parsed through its own
 /// <c>ParseDataDeclaration</c> — is already lowered by the time the enclosing declaration is built.
@@ -49,10 +51,12 @@ static class PropertyLowering
 
             if (prop.SetterBody is { } setterBody)
             {
-                var assign = new AssignmentStatementSyntax(
-                    new MemberAccessExpressionSyntax(new NameExpressionSyntax("self"), field.Name),
-                    setterBody);
-                var body = new BlockStatementSyntax(new StatementSyntax[] { assign });
+                StatementSyntax setterStatement = prop.HasCustomGetter
+                    ? new ExpressionStatementSyntax(setterBody)
+                    : new AssignmentStatementSyntax(
+                        new MemberAccessExpressionSyntax(new NameExpressionSyntax("self"), field.Name),
+                        setterBody);
+                var body = new BlockStatementSyntax(new[] { setterStatement });
                 added.Add(new FunctionDeclarationSyntax(
                     accessorPublic, "set_" + field.Name, Array.Empty<string>(),
                     new List<ParameterSyntax> { new("self", selfType), new(prop.SetterParam ?? "value", field.Type) },

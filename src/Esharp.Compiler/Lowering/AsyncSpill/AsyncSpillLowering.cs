@@ -254,7 +254,9 @@ internal static class AsyncSpillLowering
 
             var old = rw.Spill(readTarget, output);          // read BEFORE the await
             var value = rw.Linearize(ca.Value, output);      // the await(s)
-            var combined = new BoundBinaryExpression(old, baseOp, value, t);
+            var combined = ca.Combined is { } resolved
+                ? resolved with { Left = old, Right = value }
+                : new BoundBinaryExpression(old, baseOp, value, t);
             output.Add(new BoundAssignment(writeTarget, combined) { Span = ca.Span });
         }
 
@@ -282,13 +284,21 @@ internal static class AsyncSpillLowering
 
         // Map a compound-assignment operator to its base binary operator so the
         // synthesized `BoundBinaryExpression` lands on a case the emitter handles.
-        // (E# compound operators are `+=` / `-=` / `*=` / `/=`.)
+        // Keep this exhaustive with StatementBinder/AssignmentLowering so an await on
+        // the right-hand side cannot discard the selected primitive or user operator.
         static SyntaxTokenKind BaseOp(SyntaxTokenKind op) => op switch
         {
             SyntaxTokenKind.PlusEquals => SyntaxTokenKind.Plus,
             SyntaxTokenKind.MinusEquals => SyntaxTokenKind.Minus,
             SyntaxTokenKind.StarEquals => SyntaxTokenKind.Star,
             SyntaxTokenKind.SlashEquals => SyntaxTokenKind.Slash,
+            SyntaxTokenKind.PercentEquals => SyntaxTokenKind.Percent,
+            SyntaxTokenKind.AmpersandEquals => SyntaxTokenKind.Ampersand,
+            SyntaxTokenKind.PipeEquals => SyntaxTokenKind.Pipe,
+            SyntaxTokenKind.CaretEquals => SyntaxTokenKind.Caret,
+            SyntaxTokenKind.ShiftLeftEquals => SyntaxTokenKind.ShiftLeft,
+            SyntaxTokenKind.ShiftRightEquals => SyntaxTokenKind.ShiftRight,
+            SyntaxTokenKind.UnsignedShiftRightEquals => SyntaxTokenKind.UnsignedShiftRight,
             _ => op,
         };
     }

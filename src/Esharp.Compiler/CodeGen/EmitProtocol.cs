@@ -68,11 +68,13 @@ public static partial class CodeGenerator
             (e.IsPublic ? TypeAttributes.Public : TypeAttributes.NotPublic) | TypeAttributes.Sealed,
             module.ImportReference(typeof(Enum)));
 
-        // Enums need a special "value__" field
+        var underlyingClr = EnumUnderlyingClrType(e.UnderlyingType);
+
+        // Enums need a special "value__" field, typed to the enum's underlying type.
         enumType.Fields.Add(new FieldDefinition(
             "value__",
             FieldAttributes.Public | FieldAttributes.SpecialName | FieldAttributes.RTSpecialName,
-            module.ImportReference(typeof(int))));
+            module.ImportReference(underlyingClr)));
 
         for (var i = 0; i < e.Cases.Count; i++)
         {
@@ -81,7 +83,9 @@ public static partial class CodeGenerator
                 FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal,
                 enumType)
             {
-                Constant = e.Cases[i].Value
+                // The literal constant must be boxed as the underlying integral type, so
+                // the metadata matches `value__` (a byte-backed enum stores a byte).
+                Constant = System.Convert.ChangeType(e.Cases[i].Value, underlyingClr)
             };
             enumType.Fields.Add(caseField);
         }
@@ -89,4 +93,17 @@ public static partial class CodeGenerator
         module.Types.Add(enumType);
         types.Register(e.Name, enumType);
     }
+
+    static Type EnumUnderlyingClrType(string primitive) => primitive switch
+    {
+        "byte" => typeof(byte),
+        "sbyte" => typeof(sbyte),
+        "short" => typeof(short),
+        "ushort" => typeof(ushort),
+        "int" => typeof(int),
+        "uint" => typeof(uint),
+        "long" => typeof(long),
+        "ulong" => typeof(ulong),
+        _ => typeof(int),
+    };
 }

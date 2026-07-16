@@ -1,4 +1,5 @@
 using Esharp.Diagnostics;
+using Esharp.Lowering;
 using Esharp.Symbols;
 using Esharp.Syntax;
 
@@ -16,6 +17,7 @@ internal sealed class DeclarationBinder : BinderUnit
 
     internal BoundDataDeclaration BindData(DataDeclarationSyntax syntax, List<BoundFunctionDeclaration> instanceMethods, IReadOnlyList<BoundFunctionDeclaration>? pointerMethods = null, TypeSymbol? selfSymbol = null)
     {
+        _ = BindFloatingPointDirectives(syntax.CompilerDirectives);
         var prevScope = Scope;
         Scope = Scope.Child();
         foreach (var tp in syntax.TypeParameters)
@@ -41,11 +43,56 @@ internal sealed class DeclarationBinder : BinderUnit
             }
         }
 
+        // A per-accessor `pub`/`priv` may only NARROW the property's own visibility.
+        // Widening (`priv var X { pub set }`) is ES2229; on widening we drop the override
+        // so emission falls back to the property visibility.
+        static int VisRank(Esharp.Syntax.Visibility v) => v switch
+        {
+            Esharp.Syntax.Visibility.Public => 2,
+            Esharp.Syntax.Visibility.Internal => 1,
+            _ => 0,
+        };
+        Esharp.Syntax.Visibility PropVis(FieldSyntax f) => f.IsPublic switch
+        {
+            true => Esharp.Syntax.Visibility.Public,
+            false => Esharp.Syntax.Visibility.Private,
+            null => syntax.IsPublic ? Esharp.Syntax.Visibility.Public : Esharp.Syntax.Visibility.Internal,
+        };
+        Esharp.Syntax.Visibility? NarrowAccessor(FieldSyntax f, Esharp.Syntax.Visibility? accessorVis, string accessorName)
+        {
+            if (accessorVis is not { } av) return null;
+            var propVis = PropVis(f);
+            if (VisRank(av) > VisRank(propVis))
+            {
+                Diagnostics.Report(f.Span.IsValid ? f.Span : syntax.Span,
+                    DiagnosticDescriptors.AccessorCannotWidenVisibility,
+                    accessorName, f.Name, av.ToString().ToLowerInvariant(), propVis.ToString().ToLowerInvariant());
+                return null;
+            }
+            return av;
+        }
+
         var fields = syntax.Fields.Select(f =>
         {
             var directMutWritable = f.Property?.MutStorageName is { } mutStorage
                 && syntax.Fields.FirstOrDefault(candidate => candidate.Name == mutStorage)?.Mutable == true;
             var fieldType = ResolveType(f.Type);
+            if (IsByRefLike(fieldType))
+                Diagnostics.Report(f.Span.IsValid ? f.Span : syntax.Span,
+                    DiagnosticDescriptors.ByRefLikeField, TypeDisplayName(fieldType), $"{syntax.Name}.{f.Name}");
+            if (f.Mutable && f.Property is { ComputedGetter: not null, HasCustomGetter: false })
+                Diagnostics.Report(f.Span.IsValid ? f.Span : syntax.Span,
+                    DiagnosticDescriptors.VarArrowRequiresWriteBehavior, f.Name);
+            if (f.Mutable && f.Property is
+                {
+                    ComputedGetter: not null,
+                    HasCustomGetter: true,
+                    SetterBody: null,
+                    MutStorageName: null,
+                    ScopedMutBody: null
+                })
+                Diagnostics.Report(f.Span.IsValid ? f.Span : syntax.Span,
+                    DiagnosticDescriptors.CustomVarGetterRequiresWriteBehavior, f.Name);
             if (f.Type is PointerTypeSyntax && !Types.StarClassError(fieldType, f.Type.Span))
             {
                 // A field is shared, heap-resident storage — a `*T` field always
@@ -81,7 +128,9 @@ internal sealed class DeclarationBinder : BinderUnit
                 PropLocaStorageName: f.Property?.MutStorageName ?? f.Property?.LocaStorageName,
                 PropHasMut: f.Property?.MutStorageName is not null || f.Property?.ScopedMutBody is not null,
                 PropMutWritable: directMutWritable,
-                PropHasCustomSetter: f.Property?.SetterBody is not null);
+                PropHasCustomSetter: f.Property?.SetterBody is not null,
+                GetterVis: NarrowAccessor(f, f.Property?.GetterVisibility, "get"),
+                SetterVis: NarrowAccessor(f, f.Property?.SetterVisibility, "set"));
         }).ToList();
 
         // A scoped `mut` is bound in the property's real instance context.  It is
@@ -180,6 +229,24 @@ internal sealed class DeclarationBinder : BinderUnit
                     baseClass = iface;
                 continue;
             }
+            // First entry resolving to a same-project C# CLASS is the base class — the
+            // mixed-language case `class Derived : CsBase`. It is registered as an
+            // ExternalCSharp handle (from the Roslyn declare-only pass), not an E# decl and
+            // not a runtime type (the C# half isn't emitted yet), so neither branch above
+            // sees it; consult the adapter handle directly. A C# interface stays in the
+            // interface list (IsInterface guard); a sealed C# base can't be extended.
+            if (baseClass is null && i == 0
+                && syntax.IsRef
+                && Data.Symbols.FindTypeQualified(iface, TypeSymbolKind.ExternalCSharp)?.CSharpHandle
+                    is { IsRefType: true, IsInterface: false } csBase)
+            {
+                if (csBase.IsSealed)
+                    Diagnostics.Report(syntax.Interfaces[i].Span,
+                        $"ES2192: '{syntax.Name}' cannot inherit from sealed type '{iface}'.");
+                else
+                    baseClass = iface;
+                continue;
+            }
             // Non-first class-named entries are an error (base must come first).
             if (Data.Symbols.DataDecl(iface) is { } asData && asData.IsRef
                 && asData.Modifier is ClassModifier.Open or ClassModifier.Abstract)
@@ -246,8 +313,21 @@ internal sealed class DeclarationBinder : BinderUnit
             }
             else
             {
-                Diagnostics.Report(syntax.Span,
-                    $"Type '{syntax.Name}' declares conformance to protocol '{iface}' but does not implement all required methods (checked both its value method set and its '*{syntax.Name}' method set).");
+                var fieldMismatch = declaredProto.Properties?.FirstOrDefault(req => fields.Any(field =>
+                    !field.IsProperty && !field.IsEmbedded && !field.IsEvent
+                    && field.Name == req.Name
+                    && SignatureTypeMatches(ResolveType(req.Type), field.Type)));
+                if (fieldMismatch is not null)
+                {
+                    var fieldSpan = syntax.Fields.FirstOrDefault(field =>
+                        field.Name == fieldMismatch.Name && field.Property is null)?.Span;
+                    Diagnostics.Report(fieldSpan is { IsValid: true } located ? located : syntax.Span,
+                        DiagnosticDescriptors.FieldCannotImplementInterfaceProperty,
+                        syntax.Name, fieldMismatch.Name, iface);
+                }
+                else
+                    Diagnostics.Report(syntax.Span,
+                        $"Type '{syntax.Name}' declares conformance to protocol '{iface}' but does not implement all required methods (checked both its value method set and its '*{syntax.Name}' method set).");
                 valueInterfaces.Add(iface); // keep a target for downstream emission
             }
         }
@@ -468,7 +548,7 @@ internal sealed class DeclarationBinder : BinderUnit
             IsUserRef: syntax.IsRef,
             Modifier: syntax.Modifier, BaseClass: baseClass, InterfaceTypes: interfaceTypes,
             CapturedHeaderParams: capturedHeaderParams, IsPositionalData: syntax.IsPositional)
-        { Span = syntax.Span };
+        { Span = syntax.Span, GenericConstraints = syntax.GenericConstraints };
     }
 
     /// Walk the inheritance chain to refine `: func` placeholder roles and to
@@ -875,42 +955,42 @@ internal sealed class DeclarationBinder : BinderUnit
                 && InterfaceSignatureMatches(m, method));
             if (match is null) return false;
         }
-        // Property requirements: satisfied by a property OR a plain field of the same
-        // name and type with at least the required accessor capability. The setter kind
+        // Property requirements are satisfied only by an explicitly declared property
+        // of the same name and type. Conformance never changes a field's representation
+        // or synthesizes a property ABI for it. The setter kind
         // must match EXACTLY — a `{ get set }` requirement (plain setter) is not filled by
         // a get+init member and vice-versa, because the two emit distinct CLR slots (the
         // init setter carries modreq(IsExternalInit)). A get-only requirement is satisfied
-        // by any form (every property/field exposes a getter), so a `var x { }` satisfies
+        // by any property form, so a `var x { }` satisfies
         // a `let x { get }`.
         if (protocol.Properties is { } reqs)
             foreach (var req in reqs)
             {
                 var f = fields.FirstOrDefault(x =>
-                    !x.IsEmbedded && !x.IsEvent && x.Name == req.Name
+                    x.IsProperty && !x.IsEmbedded && !x.IsEvent && x.Name == req.Name
                     && SignatureTypeMatches(ResolveType(req.Type), x.Type));
                 if (f is null) return false;
                 if (req.HasSet)
                 {
-                    // Freely-settable setter: a get+set property, or a mutable plain field.
-                    var settable = f.IsProperty ? (f.PropHasSet && !f.IsComputedProperty) : f.Mutable;
+                    // Freely-settable setter: stored get+set, or an authored getter
+                    // paired with a behavioral setter.
+                    var settable = f.PropHasSet
+                        && (!f.IsComputedProperty || f.PropHasCustomSetter);
                     if (!settable) return false;
                 }
                 if (req.HasInit)
                 {
-                    // Init-only setter: a get+init property, or a write-once (`let`) field
-                    // whose synthesized accessor is emitted init-only.
-                    var initable = f.IsProperty ? f.PropHasInit : !f.Mutable;
+                    // Init-only setter: a get+init property.
+                    var initable = f.PropHasInit;
                     if (!initable) return false;
                 }
                 if (req.HasLoca)
                 {
-                    // A direct field can expose its location through synthesized
-                    // interface accessors. A property must have a genuinely durable
-                    // contract: implicit stored identity, explicit loca, or direct mut.
+                    // A property must have a genuinely durable contract: implicit
+                    // stored identity, explicit loca, or direct mut.
                     // A computed/custom-unacknowledged/scoped-only property cannot
                     // satisfy an interface that promises location escape.
-                    var durable = !f.IsProperty
-                        || !f.IsComputedProperty
+                    var durable = !f.IsComputedProperty
                         && (f.PropHasExplicitLoca
                             || f.PropHasMut && f.ScopedMut is null
                             || !f.PropHasMut && !f.PropHasCustomSetter);
@@ -1024,6 +1104,7 @@ internal sealed class DeclarationBinder : BinderUnit
 
     internal BoundInterfaceDeclaration BindProtocol(InterfaceDeclarationSyntax syntax)
     {
+        _ = BindFloatingPointDirectives(syntax.CompilerDirectives);
         // Generic interface: declare the type parameters in scope so the method
         // signatures resolve `T` to a generic-parameter placeholder (mirrors BindChoice).
         var prevScope = Scope;
@@ -1110,6 +1191,20 @@ internal sealed class DeclarationBinder : BinderUnit
 
     internal BoundNamespaceStateDeclaration BindNamespaceState(NamespaceStateDeclarationSyntax syntax)
     {
+        if (syntax.Mutable && syntax.Property is { ComputedGetter: not null, HasCustomGetter: false })
+            Diagnostics.Report(syntax.Span,
+                DiagnosticDescriptors.VarArrowRequiresWriteBehavior, syntax.Name);
+        if (syntax.Mutable && syntax.Property is
+            {
+                ComputedGetter: not null,
+                HasCustomGetter: true,
+                SetterBody: null,
+                MutStorageName: null,
+                ScopedMutBody: null
+            })
+            Diagnostics.Report(syntax.Span,
+                DiagnosticDescriptors.CustomVarGetterRequiresWriteBehavior, syntax.Name);
+
         BoundExpression? initializer = syntax.Initializer is null
             ? null
             : Expressions.BindExpression(syntax.Initializer);
@@ -1129,7 +1224,10 @@ internal sealed class DeclarationBinder : BinderUnit
             var previous = Scope;
             Scope = Scope.Child();
             Scope.Declare(syntax.Property.SetterParam ?? "value", type, mutable: false);
-            setterBody = Expressions.Coerce(Expressions.BindExpression(setter, type), type);
+            var boundSetter = Expressions.BindExpression(setter);
+            setterBody = syntax.Property.HasCustomGetter
+                ? boundSetter
+                : Expressions.Coerce(boundSetter, type);
             Scope = previous;
         }
 
@@ -1153,6 +1251,7 @@ internal sealed class DeclarationBinder : BinderUnit
 
     internal BoundFunctionDeclaration BindFunction(FunctionDeclarationSyntax syntax, TypeSyntax? defaultReturnsOverride = null, DataDeclarationSyntax? captureOwner = null)
     {
+        var contractFma = BindFloatingPointDirectives(syntax);
         var prevScope = Scope;
         var prevReturn = Ctx.CurrentReturnType;
         var prevHasAwait = Ctx.CurrentFunctionHasAwait;
@@ -1197,6 +1296,14 @@ internal sealed class DeclarationBinder : BinderUnit
             if (fallback is not null) effectiveReturn = fallback;
         }
         var returnType = ResolveHeapPointerAware(effectiveReturn);
+        // A by-ref-like return is rejected up front UNLESS it is a Span/ReadOnlySpan,
+        // which P2 permits when the returned value provably derives from a heap array,
+        // a receiver field, or a span/array/readonly-*T parameter. That provenance can
+        // only be judged once the body is bound, so the span case is checked below.
+        var isSpanReturn = IsSpanLike(returnType);
+        if (IsByRefLike(returnType) && !isSpanReturn)
+            Diagnostics.Report(effectiveReturn.Span.IsValid ? effectiveReturn.Span : syntax.Span,
+                DiagnosticDescriptors.ByRefLikeReturn, syntax.Name, TypeDisplayName(returnType));
         var returnsAsyncStream = returnType is ExternalType { Name: "IAsyncEnumerable", TypeArgs.Count: 1 };
         var hasYield = FunctionBodyHasYield(syntax);
         Ctx.CurrentFunctionAllowsYield = returnsAsyncStream;
@@ -1250,7 +1357,8 @@ internal sealed class DeclarationBinder : BinderUnit
             // A *closed* generic receiver (`func (p: Pair<int, int>) m()`) on a non-generic
             // method can't attach — the CLR hosts the method on the open type `Pair<T0,T1>`,
             // which a concrete `Pair<int,int>` `this` doesn't match.
-            if (recvType is DataType { TypeArgs.Count: > 0 } && syntax.TypeParameters.Count == 0)
+            if (receiverKind != Esharp.Symbols.ReceiverKind.Static
+                && recvType is DataType { TypeArgs.Count: > 0 } && syntax.TypeParameters.Count == 0)
                 Diagnostics.Report(recv.Type.Span,
                     $"ES2132: receiver '{recv.Name}: {TypeDisplayName(recvType)}' is a closed generic — a method attaches to the open type. Make '{syntax.Name}' generic over the type's parameters (e.g. 'func ({recv.Name}: ...<A, B>) {syntax.Name}<A, B>(...)').");
 
@@ -1320,6 +1428,9 @@ internal sealed class DeclarationBinder : BinderUnit
             DeclareLocal(p.Name, paramType, mutable: true, p.NameSpan, isParameter: true);
         }
 
+        if (Data.ShowAllocations)
+            ReportValueCopyDiagnostics(syntax, parameters, returnType, receiverKind);
+
         // Primary-ctor capture: an in-body method of a headered class binds with
         // the header params reachable as capture candidates. The shared Captured
         // set (one per class, across all its methods) feeds Pass 4's field
@@ -1338,9 +1449,23 @@ internal sealed class DeclarationBinder : BinderUnit
 
         var body = Statements.BindBlock(syntax.Body);
         Ctx.HeaderCapture = prevCapture;
+
+        // P2 return-lifetime: a span return is well-formed only when every returned span
+        // provably derives from a heap array, a receiver field, or a span/array/readonly-*T
+        // parameter. A span rooted in a stack buffer or a local `&`-address escapes the
+        // frame and still trips ES2231.
+        if (isSpanReturn)
+            CheckSpanReturnLifetime(syntax, body, parameters, returnType);
         // Every stream yield becomes an awaited channel write in its synthesized
         // producer, even when the source has no explicit await.
         var hasAwait = Ctx.CurrentFunctionHasAwait || (returnsAsyncStream && hasYield);
+        if (hasAwait)
+        {
+            foreach (var (liveName, liveType) in AwaitPointAnalyzer.Analyze(body, parameters).SpilledLocals
+                         .Where(local => IsByRefLike(local.Type)))
+                Diagnostics.Report(syntax.Span, DiagnosticDescriptors.ByRefLikeAsyncState,
+                    syntax.Name, $"value '{liveName}: {TypeDisplayName(liveType)}'");
+        }
         if (returnsAsyncStream && hasYield)
             asyncShape = AsyncReturnShape.AsyncEnumerable;
 
@@ -1400,7 +1525,153 @@ internal sealed class DeclarationBinder : BinderUnit
             ExplicitInterfaceType: syntax.ExplicitInterface is null ? null : ResolveType(syntax.ExplicitInterface),
             ReceiverKind: receiverKind,
             IsTypeBodyMethod: syntax.IsTypeBodyMethod)
-        { Span = syntax.Span, Symbol = Data.Symbols.FunctionForDecl(syntax) };
+        { Span = syntax.Span, Symbol = Data.Symbols.FunctionForDecl(syntax), ContractFma = contractFma, OperatorKind = syntax.OperatorKind, GenericConstraints = syntax.GenericConstraints };
+    }
+
+    // True for `Span<T>` / `ReadOnlySpan<T>` — the by-ref-like returns P2 permits.
+    bool IsSpanLike(BoundType type)
+    {
+        var runtime = ResolveBoundTypeToRuntime(type);
+        if (runtime is null || !runtime.IsGenericType) return false;
+        var def = runtime.GetGenericTypeDefinition();
+        return def == typeof(System.Span<>) || def == typeof(System.ReadOnlySpan<>);
+    }
+
+    // P2 return-lifetime: walk every `return <span>` and reject the ones whose span is
+    // rooted in a frame-local address (a stack buffer or `&local`) — those escape. A
+    // span rooted in a heap array, a receiver field, or a parameter is well-formed.
+    void CheckSpanReturnLifetime(FunctionDeclarationSyntax syntax, BoundBlockStatement body,
+        IReadOnlyList<BoundParameter> parameters, BoundType returnType)
+    {
+        // A local whose span is seeded from a frame-rooted source (a stack buffer or
+        // `&local`) is itself frame-rooted — returning it, directly or after a slice,
+        // escapes. Collect those names so a bare `return s` is caught, not just an
+        // inline `return stackalloc …`.
+        var frameLocals = new HashSet<string>(StringComparer.Ordinal);
+        CollectFrameRootedLocals(body, frameLocals);
+
+        var returns = new List<BoundExpression>();
+        CollectReturnExpressions(body, returns);
+        foreach (var ret in returns)
+        {
+            if (ret.Type is null || !IsSpanLike(ret.Type)) continue;
+            if (SpanRootsInFrame(ret, frameLocals))
+                Diagnostics.Report(syntax.Span, DiagnosticDescriptors.ByRefLikeReturn,
+                    syntax.Name, TypeDisplayName(returnType));
+        }
+    }
+
+    static void CollectFrameRootedLocals(BoundStatement stmt, HashSet<string> frameLocals)
+    {
+        switch (stmt)
+        {
+            case BoundVariableDeclaration { Name: var n, Initializer: { } init }
+                when SpanRootsInFrame(init, frameLocals):
+                frameLocals.Add(n);
+                break;
+            case BoundBlockStatement b: foreach (var s in b.Statements) CollectFrameRootedLocals(s, frameLocals); break;
+            case BoundIfStatement i:
+                CollectFrameRootedLocals(i.Then, frameLocals);
+                if (i.Else is not null) CollectFrameRootedLocals(i.Else, frameLocals);
+                break;
+            case BoundWhileStatement w: CollectFrameRootedLocals(w.Body, frameLocals); break;
+            case BoundForEachStatement f: CollectFrameRootedLocals(f.Body, frameLocals); break;
+        }
+    }
+
+    static void CollectReturnExpressions(BoundStatement stmt, List<BoundExpression> sink)
+    {
+        switch (stmt)
+        {
+            case BoundReturnStatement { Expression: { } e }: sink.Add(e); break;
+            case BoundBlockStatement b: foreach (var s in b.Statements) CollectReturnExpressions(s, sink); break;
+            case BoundIfStatement i:
+                CollectReturnExpressions(i.Then, sink);
+                if (i.Else is not null) CollectReturnExpressions(i.Else, sink);
+                break;
+            case BoundWhileStatement w: CollectReturnExpressions(w.Body, sink); break;
+            case BoundForEachStatement f: CollectReturnExpressions(f.Body, sink); break;
+        }
+    }
+
+    // A span "roots in the frame" when its provenance reaches a stack allocation or the
+    // address of a local — both die with the frame. Descending through slices, indexes,
+    // member access, conversions, and span-constructor arguments finds that root.
+    static bool SpanRootsInFrame(BoundExpression e, HashSet<string> frameLocals) => e switch
+    {
+        BoundStackAllocExpression => true,
+        BoundAddressOfVariableExpression => true,
+        BoundNameExpression n => frameLocals.Contains(n.Name),
+        BoundRangeExpression r => r.Target is not null && SpanRootsInFrame(r.Target, frameLocals),
+        BoundIndexExpression ix => SpanRootsInFrame(ix.Target, frameLocals),
+        BoundMemberAccessExpression m => SpanRootsInFrame(m.Target, frameLocals),
+        BoundConversion c => SpanRootsInFrame(c.Operand, frameLocals),
+        BoundCallExpression call =>
+            (call.Target is BoundMemberAccessExpression mc && SpanRootsInFrame(mc.Target, frameLocals))
+            || call.Arguments.Any(a => SpanRootsInFrame(a, frameLocals)),
+        BoundObjectCreationExpression oc => oc.Fields.Any(fld => SpanRootsInFrame(fld.Value, frameLocals)),
+        _ => false,
+    };
+
+    bool BindFloatingPointDirectives(FunctionDeclarationSyntax syntax)
+        => BindFloatingPointDirectives(syntax.CompilerDirectives);
+
+    bool BindFloatingPointDirectives(IReadOnlyList<CompilerDirectiveSyntax> directives)
+    {
+        var seen = false;
+        var enabled = false;
+        foreach (var directive in directives)
+        {
+            if (!string.Equals(directive.Name, "floatMode", StringComparison.Ordinal))
+            {
+                Diagnostics.Report(directive.Span, DiagnosticDescriptors.InvalidCompilerDirective,
+                    $"Unknown compiler directive '@{directive.Name}'.");
+                continue;
+            }
+            if (seen)
+            {
+                Diagnostics.Report(directive.Span, DiagnosticDescriptors.ConflictingCompilerDirective);
+                continue;
+            }
+            seen = true;
+            if (directive.Arguments.Count != 1
+                || directive.Arguments[0].Name != "contractFma")
+            {
+                Diagnostics.Report(directive.Span, DiagnosticDescriptors.InvalidCompilerDirective,
+                    "'@floatMode' currently requires exactly 'contractFma: true' or 'contractFma: false'.");
+                continue;
+            }
+            enabled = directive.Arguments[0].Value;
+        }
+        return enabled;
+    }
+
+    void ReportValueCopyDiagnostics(FunctionDeclarationSyntax syntax,
+        IReadOnlyList<BoundParameter> parameters, BoundType returnType, ReceiverKind receiverKind)
+    {
+        const int threshold = 32;
+        for (var i = 0; i < parameters.Count; i++)
+        {
+            var parameter = parameters[i];
+            if (parameter.ByRef || parameter.ReadOnlyByRef) continue;
+            var (_, size) = Types.FieldMetrics(parameter.Type);
+            if (size < threshold) continue;
+            var span = i < syntax.Parameters.Count && syntax.Parameters[i].NameSpan.IsValid
+                ? syntax.Parameters[i].NameSpan
+                : syntax.Span;
+            var isValueReceiver = i == 0 && receiverKind == ReceiverKind.Value;
+            if (isValueReceiver)
+                Diagnostics.Warn(span, DiagnosticDescriptors.LargeValueReceiverCopy,
+                    parameter.Name, size, TypeDisplayName(parameter.Type));
+            else
+                Diagnostics.Warn(span, DiagnosticDescriptors.LargeValueParameterCopy,
+                    parameter.Name, TypeDisplayName(parameter.Type), size);
+        }
+
+        var (_, returnSize) = Types.FieldMetrics(returnType);
+        if (returnSize >= threshold)
+            Diagnostics.Warn(syntax.Span, DiagnosticDescriptors.LargeValueReturnCopy,
+                TypeDisplayName(returnType), returnSize);
     }
 
     // For an `await`-using function, the declared return type selects the async shape
@@ -1507,6 +1778,15 @@ internal sealed class DeclarationBinder : BinderUnit
 
     internal BoundStaticFuncDeclaration BindStaticFunc(StaticFuncDeclarationSyntax syntax)
     {
+        // Enter the facet context BEFORE binding anything in its body — a field
+        // initializer (`let Table = buildTable()`) reaches the facet's own sibling
+        // functions exactly as an inner `func` body does, through
+        // `CurrentStaticFuncName` (they are keyed `Host.name`). Binding the
+        // initializers outside this context resolved `buildTable` against nothing and
+        // masqueraded as an ES2146 undefined-name.
+        var prevSfContext = Ctx.CurrentStaticFuncName;
+        Ctx.CurrentStaticFuncName = syntax.Name;
+
         var fields = new List<BoundField>();
         foreach (var f in syntax.Fields)
         {
@@ -1525,8 +1805,6 @@ internal sealed class DeclarationBinder : BinderUnit
         Scope = Scope.Child();
         foreach (var f in fields)
             Scope.Declare(f.Name, f.Type);
-        var prevSfContext = Ctx.CurrentStaticFuncName;
-        Ctx.CurrentStaticFuncName = syntax.Name;
 
         var functions = new List<BoundFunctionDeclaration>();
         var overrideReturn = syntax.DefaultReturns?.Type;
@@ -1536,7 +1814,8 @@ internal sealed class DeclarationBinder : BinderUnit
         Scope = prevSfScope;
         Ctx.CurrentStaticFuncName = prevSfContext;
 
-        return new BoundStaticFuncDeclaration(syntax.IsPublic, syntax.Name, fields, functions);
+        return new BoundStaticFuncDeclaration(syntax.IsPublic, syntax.Name, fields, functions)
+        { TypeParameters = syntax.GenericParameters };
     }
 
     // Synthesize a forwarder method on `outerName` that calls `innerMethod` through

@@ -85,6 +85,7 @@ public abstract class BoundTreeVisitor
             case BoundObjectCreationExpression _n:          VisitObjectCreationExpression(_n); break;
             case BoundIndexExpression _n:                   VisitIndexExpression(_n); break;
             case BoundArrayCreationExpression _n:           VisitArrayCreationExpression(_n); break;
+            case BoundStackAllocExpression _n:              VisitStackAllocExpression(_n); break;
             case BoundTupleLiteralExpression _n:            VisitTupleLiteralExpression(_n); break;
             case BoundDefaultExpression _n:                 VisitDefaultExpression(_n); break;
             case BoundOutArgumentExpression _n:             VisitOutArgumentExpression(_n); break;
@@ -378,6 +379,11 @@ public abstract class BoundTreeVisitor
     VisitExpression(node.Size);
     }
 
+    protected virtual void VisitStackAllocExpression(BoundStackAllocExpression node)
+    {
+    VisitExpression(node.Size);
+    }
+
     protected virtual void VisitTupleLiteralExpression(BoundTupleLiteralExpression node)
     {
     foreach (var _e in node.Elements) VisitExpression(_e);
@@ -570,6 +576,7 @@ public abstract class BoundTreeVisitor<T>
         BoundObjectCreationExpression _n           => VisitObjectCreationExpression(_n),
         BoundIndexExpression _n                    => VisitIndexExpression(_n),
         BoundArrayCreationExpression _n            => VisitArrayCreationExpression(_n),
+        BoundStackAllocExpression _n               => VisitStackAllocExpression(_n),
         BoundTupleLiteralExpression _n             => VisitTupleLiteralExpression(_n),
         BoundDefaultExpression _n                  => VisitDefaultExpression(_n),
         BoundOutArgumentExpression _n              => VisitOutArgumentExpression(_n),
@@ -658,6 +665,7 @@ public abstract class BoundTreeVisitor<T>
     protected virtual T VisitObjectCreationExpression(BoundObjectCreationExpression node) => DefaultResult;
     protected virtual T VisitIndexExpression(BoundIndexExpression node) => DefaultResult;
     protected virtual T VisitArrayCreationExpression(BoundArrayCreationExpression node) => DefaultResult;
+    protected virtual T VisitStackAllocExpression(BoundStackAllocExpression node) => DefaultResult;
     protected virtual T VisitTupleLiteralExpression(BoundTupleLiteralExpression node) => DefaultResult;
     protected virtual T VisitDefaultExpression(BoundDefaultExpression node) => DefaultResult;
     protected virtual T VisitOutArgumentExpression(BoundOutArgumentExpression node) => DefaultResult;

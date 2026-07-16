@@ -1,22 +1,25 @@
 <!--
   The E# MSBuild SDK (props half). An .esproj uses it as a one-liner:
 
-    <Project Sdk="Esharp.Sdk">
+    <Project Sdk="Esharp.Sdk/0.1.0">
       <PropertyGroup>
-        <EsharpSdkBase>Microsoft.NET.Sdk.Web</EsharpSdkBase>  <!-- optional: web app -->
+        <EsharpSdkBase>Microsoft.NET.Sdk.Web</EsharpSdkBase>
       </PropertyGroup>
       ...
     </Project>
 
-  The base SDK is Microsoft.NET.Sdk (console/library) unless <EsharpSdkBase> selects
-  Microsoft.NET.Sdk.Web. The E# compile — the EsharpCompile task over the .es (and,
-  with <IncludeCSharp>, .cs) sources — is layered on automatically by Sdk.targets.
+  The base SDK is Microsoft.NET.Sdk (console/library) unless EsharpSdkBase selects
+  Microsoft.NET.Sdk.Web (a web app). The E# compile — the EsharpCompile task over the
+  .es (and, with IncludeCSharp, .cs) sources — is layered on automatically by Sdk.targets.
 -->
 <Project>
   <PropertyGroup>
-    <!-- Base SDK selection: console/library by default, web with
-         <EsharpSdkBase>Microsoft.NET.Sdk.Web</EsharpSdkBase>. -->
+    <!-- Base SDK selection: console/library by default; set EsharpSdkBase to
+         Microsoft.NET.Sdk.Web for a web app. Both must be resolved before the base
+         SDK's props are imported below (the base SDK reads TargetFramework during its
+         own props evaluation for framework inference). -->
     <EsharpSdkBase Condition="'$(EsharpSdkBase)' == ''">Microsoft.NET.Sdk</EsharpSdkBase>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net10.0</TargetFramework>
   </PropertyGroup>
 
   <Import Project="Sdk.props" Sdk="$(EsharpSdkBase)" />
@@ -25,9 +28,11 @@
     <Language>E#</Language>
     <DefaultLanguageSourceExtension>.es</DefaultLanguageSourceExtension>
     <EnableDefaultItems>false</EnableDefaultItems>
-    <TargetFramework Condition="'$(TargetFramework)' == ''">net10.0</TargetFramework>
     <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
     <DebugSymbols Condition="'$(DebugSymbols)' == ''">true</DebugSymbols>
+    <EsharpOptimizationLevel Condition="'$(EsharpOptimizationLevel)' == '' and '$(Optimize)' == 'true'">Release</EsharpOptimizationLevel>
+    <EsharpOptimizationLevel Condition="'$(EsharpOptimizationLevel)' == ''">Debug</EsharpOptimizationLevel>
+    <EsharpShowAllocations Condition="'$(EsharpShowAllocations)' == ''">false</EsharpShowAllocations>
     <!-- Implicit (standard BCL namespace) usings. Honor the conventional
          <ImplicitUsings>enable|disable</ImplicitUsings>, falling back to true. -->
     <EnableImplicitUsings Condition="'$(EnableImplicitUsings)' == '' and ('$(ImplicitUsings)' == 'disable' or '$(ImplicitUsings)' == 'false')">false</EnableImplicitUsings>

@@ -31,6 +31,8 @@
       AssemblyName="$(AssemblyName)"
       OutputType="$(OutputType)"
       EnableImplicitUsings="$(EnableImplicitUsings)"
+      OptimizationLevel="$(EsharpOptimizationLevel)"
+      ShowAllocations="$(EsharpShowAllocations)"
       DebugSymbols="$(DebugSymbols)" />
 
     <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).dll"

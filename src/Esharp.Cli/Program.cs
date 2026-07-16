@@ -66,17 +66,30 @@ static async Task<int> CompileIL(string input, string output, string[] optionArg
     var outputKind = optionArgs.Contains("--exe")
         ? OutputKind.Console
         : OutputKind.Library;
+    var configuration = OptionValue(optionArgs, "--configuration") ?? "Debug";
+    if (!configuration.Equals("Debug", StringComparison.OrdinalIgnoreCase)
+        && !configuration.Equals("Release", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine("--configuration must be Debug or Release.");
+        return 1;
+    }
+    var optimization = configuration.Equals("Release", StringComparison.OrdinalIgnoreCase)
+        ? OptimizationLevel.Release
+        : OptimizationLevel.Debug;
     var workspace = new Workspace(
         assemblyName: Path.GetFileNameWithoutExtension(outputPath),
         references: referencePaths.Select(MetadataReference.FromFile),
-        outputKind: outputKind);
+        outputKind: outputKind,
+        options: new ProjectOptions(Optimization: optimization,
+            ShowAllocations: optionArgs.Contains("--show-alloc")));
     foreach (var srcFile in sourceFiles)
         workspace.AddDocument(srcFile, await File.ReadAllTextAsync(srcFile));
 
     EmitResult result;
     try
     {
-        result = workspace.CurrentCompilation.EmitToFile(outputPath, debugSymbols: true);
+        result = workspace.CurrentCompilation.EmitToFile(outputPath,
+            debugSymbols: optimization == OptimizationLevel.Debug);
     }
     catch (Exception ex)
     {
@@ -119,7 +132,13 @@ static async Task<int> CompileIL(string input, string output, string[] optionArg
 static void PrintUsage()
 {
     Console.Error.WriteLine("Usage:");
-    Console.Error.WriteLine("  esharpc compile-il <input.es | dir> <output.dll> [--ref <assembly.dll> ...] [--refs-from-esproj <project.esproj>]");
+    Console.Error.WriteLine("  esharpc compile-il <input.es | dir> <output.dll> [--configuration Debug|Release] [--show-alloc] [--ref <assembly.dll> ...] [--refs-from-esproj <project.esproj>]");
+}
+
+static string? OptionValue(string[] args, string option)
+{
+    var index = Array.IndexOf(args, option);
+    return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
 }
 
 static async Task<IReadOnlyList<string>?> ResolveReferencePaths(string[] optionArgs)
@@ -152,7 +171,16 @@ static async Task<IReadOnlyList<string>?> ResolveReferencePaths(string[] optionA
                 break;
             case "--exe":
             case "--no-verify":
+            case "--show-alloc":
                 // Consumed by the caller (output-kind / verification flags); no payload.
+                break;
+            case "--configuration":
+                if (i + 1 >= optionArgs.Length)
+                {
+                    Console.Error.WriteLine("Missing Debug or Release after --configuration.");
+                    return null;
+                }
+                i++;
                 break;
             default:
                 Console.Error.WriteLine($"Unknown compile-il option: {optionArgs[i]}");
